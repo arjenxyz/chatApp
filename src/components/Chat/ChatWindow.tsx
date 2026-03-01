@@ -823,30 +823,34 @@ export function ChatWindow({
 
       {/* selection toolbar */}
       {selectedMsgIds.size > 0 && (
-        <div className="flex items-center justify-between border-b border-zinc-700 bg-zinc-800/60 px-3 py-2 text-sm">
-          <span>{selectedMsgIds.size} mesaj seçili</span>
+        <div className="flex flex-col border-b border-zinc-700 bg-zinc-800/60 px-3 py-2 text-sm">
+          <span className="mb-1">{selectedMsgIds.size} mesaj seçili</span>
           <div className="flex gap-2">
             <button
-              className="rounded-lg bg-zinc-700 px-2 py-1 text-xs hover:bg-zinc-600"
+              className="rounded-lg bg-red-600 px-3 py-1 text-xs font-medium text-white hover:bg-red-500"
               onClick={async () => {
-                // ask user whether to delete only for self or everyone
-                const choice = window.prompt("Silmek istedğinizi yazın: 1=kendinden 2=herkesten", "2");
-                if (!choice) return;
-                if (choice === "1") {
-                  setMessages((prev) => prev.filter((m) => !selectedMsgIds.has(m.id)));
-                } else {
-                  const ids = Array.from(selectedMsgIds);
-                  await supabase.from("messages").delete().in("id", ids);
-                  setMessages((prev) => prev.filter((m) => !selectedMsgIds.has(m.id)));
-                }
+                // delete only for self
+                setMessages((prev) => prev.filter((m) => !selectedMsgIds.has(m.id)));
                 setSelectedMsgIds(new Set());
               }}
               type="button"
             >
-              Sil
+              Kendinden Sil
             </button>
             <button
-              className="rounded-lg bg-zinc-700 px-2 py-1 text-xs hover:bg-zinc-600"
+              className="rounded-lg bg-red-800 px-3 py-1 text-xs font-medium text-white hover:bg-red-700"
+              onClick={async () => {
+                const ids = Array.from(selectedMsgIds);
+                await supabase.from("messages").delete().in("id", ids);
+                setMessages((prev) => prev.filter((m) => !selectedMsgIds.has(m.id)));
+                setSelectedMsgIds(new Set());
+              }}
+              type="button"
+            >
+              Herkesten Sil
+            </button>
+            <button
+              className="rounded-lg bg-zinc-700 px-3 py-1 text-xs hover:bg-zinc-600"
               onClick={() => setSelectedMsgIds(new Set())}
               type="button"
             >
