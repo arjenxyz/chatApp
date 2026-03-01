@@ -119,10 +119,10 @@ export function ChatWindow({
         if (dx > 50) {
           // right swipe
           onReply(m);
-          onSelect();
+          // do not auto-select on swipe
         } else if (dx < -50) {
           onForward(m);
-          onSelect();
+          // do not auto-select on swipe
         }
       }
       startX.current = null;
@@ -133,13 +133,6 @@ export function ChatWindow({
         className={cn("flex gap-1", mine ? "justify-end" : "justify-start")}
         onMouseEnter={() => setIsHovered(true)}
         onMouseLeave={() => setIsHovered(false)}
-        onClick={() => {
-          onSelect();
-        }}
-        onContextMenu={(e) => {
-          e.preventDefault();
-          onSelect();
-        }}
         onTouchStart={handleTouchStart}
         onTouchEnd={handleTouchEnd}
         onPointerDown={handlePointerDown}
