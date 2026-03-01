@@ -81,10 +81,10 @@ export function ChatWindow({
     onReply,
     onForward
   }: MessageItemProps) {
-    const [isEditing, setIsEditing] = useState(false);
-    const [editText, setEditText] = useState(m.content);
+    // editing is handled by parent via `editingMessage` state
     const [isHovered, setIsHovered] = useState(false);
     const touchTimer = useRef<number | null>(null);
+    const lastTap = useRef<number>(0);
 
     const handleTouchStart = () => {
       touchTimer.current = window.setTimeout(() => {
@@ -98,7 +98,7 @@ export function ChatWindow({
       }
     };
 
-    const showActions = (isHovered || selected) && !isEditing;
+    const showActions = isHovered || selected;
 
     // swipe detection
     const startX = useRef<number | null>(null);
@@ -106,6 +106,14 @@ export function ChatWindow({
       startX.current = e.clientX;
     };
     const handlePointerUp = (e: React.PointerEvent) => {
+      // double tap detection
+      const now = Date.now();
+      if (now - lastTap.current < 300) {
+        onReply(m);
+        // do not toggle selection on double tap
+      }
+      lastTap.current = now;
+
       if (startX.current !== null) {
         const dx = e.clientX - startX.current;
         if (dx > 50) {
@@ -126,7 +134,7 @@ export function ChatWindow({
         onMouseEnter={() => setIsHovered(true)}
         onMouseLeave={() => setIsHovered(false)}
         onClick={() => {
-          if (!isEditing) onSelect();
+          onSelect();
         }}
         onContextMenu={(e) => {
           e.preventDefault();
@@ -186,59 +194,34 @@ export function ChatWindow({
               selected && "ring-2 ring-zinc-400"
             )}
           >
-            {isEditing ? (
-              <div className="space-y-2 py-1">
-                <textarea
-                  className="w-full min-w-[300px] resize-none rounded bg-black/20 p-2 text-sm outline-none"
-                  value={editText}
-                  onChange={(e) => setEditText(e.target.value)}
-                  rows={3}
-                  autoFocus
-                />
-                <div className="flex gap-2">
-                  <button
-                    onClick={async () => {
-                      await supabase
-                        .from("messages")
-                        .update({ content: editText })
-                        .eq("id", m.id);
-                      setMessages((prev) =>
-                        prev.map((x) => (x.id === m.id ? { ...x, content: editText } : x))
-                      );
-                      setIsEditing(false);
-                    }}
-                    className="rounded bg-white/20 px-3 py-1 text-xs font-medium hover:bg-white/30"
-                  >
-                    Kaydet
-                  </button>
-                  <button
-                    onClick={() => {
-                      setIsEditing(false);
-                      setEditText(m.content);
-                    }}
-                    className="rounded bg-black/20 px-3 py-1 text-xs hover:bg-black/30"
-                  >
-                    İptal
-                  </button>
+            <>
+              {m.replied_to ? (
+                <div
+                  id={`msg-${m.id}-reply`}
+                  className="mb-1 max-w-[80%] cursor-pointer rounded-l pl-2 text-xs text-zinc-300" 
+                  style={{ borderLeftColor: mine ? '#3b82f6' : '#22c55e', borderLeftWidth: 3, borderLeftStyle: 'solid' }}
+                  onClick={() => {
+                    // scroll to original message if available
+                    const orig = document.getElementById(`msg-${m.replied_to?.id}`);
+                    if (orig) orig.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                  }}
+                >
+                  <span className="font-semibold text-zinc-200">
+                    {m.replied_to.sender_id === user?.id
+                      ? 'Sen'
+                      : participants.find((p) => p.user_id === m.replied_to?.sender_id)?.profile?.username || '—'}
+                    :
+                  </span>{" "}
+                  {m.replied_to.content}
                 </div>
-              </div>
-            ) : (
-              <>
-                {m.replied_to ? (
-                  <div className="mb-1 max-w-[80%] rounded-l pl-2 text-xs text-zinc-300" 
-                       style={{ borderLeftColor: mine ? '#3b82f6' : '#22c55e', borderLeftWidth: 3, borderLeftStyle: 'solid' }}>
-                    <span className="font-semibold text-zinc-200">
-                      {m.replied_to.sender_id === user?.id
-                        ? 'Sen'
-                        : participants.find((p) => p.user_id === m.replied_to?.sender_id)?.profile?.username || '—'}
-                      :
-                    </span>{" "}
-                    {m.replied_to.content}
-                  </div>
-                ) : null}
-                <p className="whitespace-pre-wrap break-words">{m.content}</p>
-              </>
-            )}
+              ) : null}
+              <p
+                id={`msg-${m.id}`}
+                className="whitespace-pre-wrap break-words"
+              >
+                {m.content}
+              </p>
+            </>
           </div>
 
           {/* Timestamp and read status */}
@@ -260,10 +243,13 @@ export function ChatWindow({
         </div>
 
         {/* Action buttons - right side for sent */}
-        {mine && isHovered && !isEditing && (
+        {mine && isHovered && (
           <div className="flex items-center gap-0.5 self-end pb-1 opacity-0 transition-opacity duration-150 group-hover:opacity-100">
             <button
-              onClick={() => setIsEditing(true)}
+              onClick={() => {
+                setEditingMessage(m);
+                setText(m.content);
+              }}
               className="rounded p-1.5 hover:bg-zinc-700/50"
               title="Düzenle"
             >
@@ -306,13 +292,10 @@ export function ChatWindow({
   const [conversation, setConversation] = useState<ConversationRow | null>(null);
   const [participants, setParticipants] = useState<ParticipantRow[]>([]);
   const [messages, setMessages] = useState<MessageRow[]>([]);
-  const [selectedMsgId, setSelectedMsgId] = useState<string | null>(null);
+  const [selectedMsgIds, setSelectedMsgIds] = useState<Set<string>>(new Set());
   const [replyTarget, setReplyTarget] = useState<MessageRow | null>(null);
   const [forwardingMessage, setForwardingMessage] = useState<MessageRow | null>(null);
-
-  useEffect(() => {
-    setSelectedMsgId(null);
-  }, [conversationId]);
+  const [editingMessage, setEditingMessage] = useState<MessageRow | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -593,51 +576,66 @@ export function ChatWindow({
     const content = trimmedText;
     if (!content) return;
 
-    const payload: {
-      conversation_id: string;
-      sender_id: string;
-      content: string;
-      type: string;
-      replied_to?: string;
-    } = {
-      conversation_id: conversationId,
-      sender_id: user.id,
-      content,
-      type: "text"
-    };
-    if (replyTarget) payload.replied_to = replyTarget.id;
-
-
     setError(null);
     sendingRef.current = true;
     setSending(true);
     autoScrollRef.current = true;
 
     try {
-      const { data: inserted, error: insertError } = await supabase
-        .from("messages")
-        .insert(payload)
-        .select("id, conversation_id, sender_id, content, type, created_at, is_read, replied_to(id,content,sender_id)")
-        .single();
+      if (editingMessage) {
+        // update existing message
+        const { error: updateError } = await supabase
+          .from("messages")
+          .update({ content })
+          .eq("id", editingMessage.id);
+        if (updateError) {
+          setError(updateError.message);
+          return;
+        }
+        setMessages((prev) =>
+          prev.map((m) => (m.id === editingMessage.id ? { ...m, content } : m))
+        );
+        setEditingMessage(null);
+      } else {
+        const payload: {
+          conversation_id: string;
+          sender_id: string;
+          content: string;
+          type: string;
+          replied_to?: string;
+        } = {
+          conversation_id: conversationId,
+          sender_id: user.id,
+          content,
+          type: "text"
+        };
+        if (replyTarget) payload.replied_to = replyTarget.id;
 
-      if (insertError) {
-        setError(insertError.message);
-        return;
+        const { data: inserted, error: insertError } = await supabase
+          .from("messages")
+          .insert(payload)
+          .select("id, conversation_id, sender_id, content, type, created_at, is_read, replied_to(id,content,sender_id)")
+          .single();
+
+        if (insertError) {
+          setError(insertError.message);
+          return;
+        }
+
+        if (inserted) {
+          const rawInserted = (inserted as unknown) as MessageRow & { replied_to?: unknown };
+          const next: MessageRow = {
+            ...rawInserted,
+            replied_to: Array.isArray(rawInserted.replied_to) ? rawInserted.replied_to[0] ?? null : rawInserted.replied_to
+          };
+          setMessages((prev) => (prev.some((m) => m.id === next.id) ? prev : [...prev, next]));
+        }
       }
 
       setText("");
       setReplyTarget(null);
-      if (inserted) {
-        // inserting data from Supabase often has loose `any` types.  cast via
-        // `unknown` to silence the compiler while still preserving our stricter
-        // `MessageRow` shape for downstream logic.
-        const rawInserted = (inserted as unknown) as MessageRow & { replied_to?: unknown };
-        const next: MessageRow = {
-          ...rawInserted,
-          replied_to: Array.isArray(rawInserted.replied_to) ? rawInserted.replied_to[0] ?? null : rawInserted.replied_to
-        };
-        setMessages((prev) => (prev.some((m) => m.id === next.id) ? prev : [...prev, next]));
-      }
+      // refocus after the DOM updates so mobile keyboard doesn't dismiss
+      setTimeout(() => inputRef.current?.focus(), 0);
     } finally {
       sendingRef.current = false;
       setSending(false);
@@ -757,8 +755,15 @@ export function ChatWindow({
                             showTimestamp={false}
                             supabase={supabase}
                             setMessages={setMessages}
-                            selected={selectedMsgId === msg.id}
-                            onSelect={() => setSelectedMsgId((prev) => (prev === msg.id ? null : msg.id))}
+                            selected={selectedMsgIds.has(msg.id)}
+                            onSelect={() => {
+                              setSelectedMsgIds((prev) => {
+                                const next = new Set(prev);
+                                if (next.has(msg.id)) next.delete(msg.id);
+                                else next.add(msg.id);
+                                return next;
+                              });
+                            }}
                             onReply={(m) => setReplyTarget(m)}
                             onForward={(m) => setForwardingMessage(m)}
                           />
@@ -795,8 +800,15 @@ export function ChatWindow({
                       showTimestamp={msgIdx === group.messages.length - 1}
                       supabase={supabase}
                       setMessages={setMessages}
-                      selected={selectedMsgId === msg.id}
-                      onSelect={() => setSelectedMsgId((prev) => (prev === msg.id ? null : msg.id))}
+                      selected={selectedMsgIds.has(msg.id)}
+                      onSelect={() => {
+                        setSelectedMsgIds((prev) => {
+                          const next = new Set(prev);
+                          if (next.has(msg.id)) next.delete(msg.id);
+                          else next.add(msg.id);
+                          return next;
+                        });
+                      }}
                       onReply={(m) => setReplyTarget(m)}
                       onForward={(m) => setForwardingMessage(m)}
                     />
@@ -809,13 +821,57 @@ export function ChatWindow({
         <div ref={bottomRef} />
       </div>
 
+      {/* selection toolbar */}
+      {selectedMsgIds.size > 0 && (
+        <div className="flex items-center justify-between border-b border-zinc-700 bg-zinc-800/60 px-3 py-2 text-sm">
+          <span>{selectedMsgIds.size} mesaj seçili</span>
+          <div className="flex gap-2">
+            <button
+              className="rounded-lg bg-zinc-700 px-2 py-1 text-xs hover:bg-zinc-600"
+              onClick={async () => {
+                // ask user whether to delete only for self or everyone
+                const choice = window.prompt("Silmek istedğinizi yazın: 1=kendinden 2=herkesten", "2");
+                if (!choice) return;
+                if (choice === "1") {
+                  setMessages((prev) => prev.filter((m) => !selectedMsgIds.has(m.id)));
+                } else {
+                  const ids = Array.from(selectedMsgIds);
+                  await supabase.from("messages").delete().in("id", ids);
+                  setMessages((prev) => prev.filter((m) => !selectedMsgIds.has(m.id)));
+                }
+                setSelectedMsgIds(new Set());
+              }}
+              type="button"
+            >
+              Sil
+            </button>
+            <button
+              className="rounded-lg bg-zinc-700 px-2 py-1 text-xs hover:bg-zinc-600"
+              onClick={() => setSelectedMsgIds(new Set())}
+              type="button"
+            >
+              İptal
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Reply preview */}
       {replyTarget ? (
-        <div className="flex items-center justify-between border-b border-zinc-700 bg-zinc-800/60 px-3 py-2 text-sm">
+        <div
+          className="flex cursor-pointer items-center justify-between border-b border-zinc-700 bg-zinc-800/60 px-3 py-2 text-sm"
+          onClick={() => {
+            const orig = document.getElementById(`msg-${replyTarget.id}`);
+            if (orig) orig.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          }}
+        >
           <span className="truncate">Yanıtlanıyor: {replyTarget.content}</span>
           <button
             className="ml-2 rounded hover:bg-zinc-700/50 p-1"
-            onClick={() => setReplyTarget(null)}
+            onClick={(e) => {
+              e.stopPropagation();
+              setReplyTarget(null);
+            }}
             type="button"
           >
             ✖
@@ -859,6 +915,11 @@ export function ChatWindow({
       )}
 
       {/* Input */}
+      {editingMessage && (
+        <div className="px-3 py-1 text-xs text-zinc-300">
+          Düzenleniyor: {editingMessage.content}
+        </div>
+      )}
       <form
         className="flex items-end gap-2 border-t border-zinc-800/50 bg-zinc-900/30 p-3"
         onSubmit={(e) => {
