@@ -117,12 +117,11 @@ export function ChatWindow({
       if (startX.current !== null) {
         const dx = e.clientX - startX.current;
         if (dx > 50) {
-          // right swipe
-          onReply(m);
-          // do not auto-select on swipe
+          // right swipe: reply only if not my message
+          if (!mine) onReply(m);
         } else if (dx < -50) {
-          onForward(m);
-          // do not auto-select on swipe
+          // left swipe: reply only if my message
+          if (mine) onReply(m);
         }
       }
       startX.current = null;
