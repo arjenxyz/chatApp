@@ -102,10 +102,13 @@ export function ChatWindow({
 
     // swipe detection
     const startX = useRef<number | null>(null);
-    const handlePointerDown = (e: React.PointerEvent) => {
-      startX.current = e.clientX;
+    const handlePointerDown = (e: React.PointerEvent | React.TouchEvent) => {
+      const clientX = 'clientX' in e ? e.clientX : e.touches[0]?.clientX;
+      if (clientX != null) startX.current = clientX;
     };
-    const handlePointerUp = (e: React.PointerEvent) => {
+    const handlePointerUp = (e: React.PointerEvent | React.TouchEvent) => {
+      const clientX = 'clientX' in e ? e.clientX : e.changedTouches[0]?.clientX;
+      // double tap detection
       // double tap detection
       const now = Date.now();
       if (now - lastTap.current < 300) {
@@ -114,12 +117,12 @@ export function ChatWindow({
       }
       lastTap.current = now;
 
-      if (startX.current !== null) {
-        const dx = e.clientX - startX.current;
-        if (dx > 50) {
+      if (startX.current !== null && clientX != null) {
+        const dx = clientX - startX.current;
+        if (dx > 30) {
           // right swipe: reply only if not my message
           if (!mine) onReply(m);
-        } else if (dx < -50) {
+        } else if (dx < -30) {
           // left swipe: reply only if my message
           if (mine) onReply(m);
         }
@@ -133,7 +136,7 @@ export function ChatWindow({
         onMouseEnter={() => setIsHovered(true)}
         onMouseLeave={() => setIsHovered(false)}
         onTouchStart={handleTouchStart}
-        onTouchEnd={handleTouchEnd}
+        onTouchEnd={(e) => { handleTouchEnd(); handlePointerUp(e); }}
         onPointerDown={handlePointerDown}
         onPointerUp={handlePointerUp}
       >
