@@ -64,10 +64,8 @@ export function ConversationList({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const [creating, setCreating] = useState(false);
-  const [targetUsername, setTargetUsername] = useState("");
-  const [createError, setCreateError] = useState<string | null>(null);
-
+  // when the user types a username in the box we may create a new DM
+  // if they press Enter or hit the plus button; no separate input needed.
   const canCreate = Boolean(profile?.username);
 
   const refresh = useCallback(async () => {
@@ -178,21 +176,17 @@ export function ConversationList({
     [items, selectedConversationId]
   );
 
-  const createDirectConversation = async () => {
+  const createDirectConversation = async (username: string) => {
     if (!user) {
-      setCreateError("Önce giriş yapmalısınız.");
+      setError("Önce giriş yapmalısınız.");
       return;
     }
 
-    // double-check that the Supabase client actually has a session –
-    // RLS failures occur when the JWT isn't attached yet.
     const { data: sessData } = await supabase.auth.getSession();
     if (!sessData.session) {
-      setCreateError("Oturumunuz geçersiz, lütfen tekrar giriş yapın.");
+      setError("Oturumunuz geçersiz, lütfen tekrar giriş yapın.");
       return;
     }
-    // ensure the client holds the latest session object; setSession will
-    // populate both access and refresh tokens so future requests include them.
     if (sessData.session.access_token) {
       await supabase.auth.setSession({
         access_token: sessData.session.access_token,
@@ -200,79 +194,52 @@ export function ConversationList({
       });
     }
 
-    setCreateError(null);
-
     if (!profile?.username) {
-      setCreateError("Önce kullanıcı adını ayarla.");
+      setError("Önce kullanıcı adını ayarla.");
       return;
     }
 
-    const target = targetUsername.trim().toLowerCase();
+    const target = username.trim().toLowerCase();
     if (!target) {
-      setCreateError("Hedef kullanıcı adı gerekli.");
-      return;
-    }
-    if (!/^[a-z0-9_]{3,20}$/.test(target)) {
-      setCreateError("Geçersiz kullanıcı adı formatı.");
+      setError("Kullanıcı adı gerekli.");
       return;
     }
 
-    setCreating(true);
-    try {
-      const { data: other, error: otherError } = await supabase
-        .from("profiles")
-        .select("id, username")
-        .eq("username", target)
-        .maybeSingle();
-
-      if (otherError) {
-        setCreateError(otherError.message);
-        return;
-      }
-      if (!other) {
-        setCreateError("Kullanıcı bulunamadı.");
-        return;
-      }
-      if (other.id === user.id) {
-        setCreateError("Kendinle sohbet başlatamazsın.");
-        return;
-      }
-
-      // create conversation with a client-generated id so that we
-      // don't need to rely on RETURNING (which triggers a SELECT policy)
-      const conversationId = crypto.randomUUID();
-
-      const { error: convError } = await supabase
-        .from("conversations")
-        .insert({ id: conversationId, is_group: false });
-
-      if (convError) {
-        setCreateError(`(${convError.code}) ${convError.message}`);
-        return;
-      }
-
-      const { error: joinError } = await supabase
-        .from("participants")
-        .insert({ conversation_id: conversationId, user_id: user.id });
-      if (joinError) {
-        setCreateError(joinError.message);
-        return;
-      }
-
-      const { error: inviteError } = await supabase
-        .from("participants")
-        .insert({ conversation_id: conversationId, user_id: other.id });
-      if (inviteError) {
-        setCreateError(inviteError.message);
-        return;
-      }
-
-      setTargetUsername("");
-      await refresh();
-      onSelectConversation(conversationId);
-    } finally {
-      setCreating(false);
+    const { data: otherUsers, error: otherError } = await supabase
+      .from("profiles")
+      .select("id")
+      .eq("username", target);
+    if (otherError) {
+      setError(otherError.message);
+      return;
     }
+    const other = otherUsers && otherUsers[0];
+    if (!other) {
+      setError("Kullanıcı bulunamadı.");
+      return;
+    }
+    if (other.id === user.id) {
+      setError("Kendinle sohbet başlatamazsın.");
+      return;
+    }
+
+    const { data: conv } = await supabase
+      .from("conversations")
+      .insert({ is_group: false })
+      .select("id")
+      .single();
+    const conversationId = conv?.id;
+
+    const { error: inviteError } = await supabase
+      .from("participants")
+      .insert({ conversation_id: conversationId, user_id: other.id });
+    if (inviteError) {
+      setError(inviteError.message);
+      return;
+    }
+
+    await refresh();
+    onSelectConversation(conversationId!);
   };
 
   // derive filtered list
@@ -288,12 +255,31 @@ export function ConversationList({
           placeholder="Ara veya DM başlat..."
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && filter.trim()) {
+              e.preventDefault();
+              if (canCreate) {
+                void createDirectConversation(filter);
+                setFilter("");
+              } else {
+                setError("Önce kullanıcı adını ayarlayın.");
+              }
+            }
+          }}
         />
         <button
           className="inline-flex items-center justify-center rounded-lg border bg-zinc-900 px-3 py-2 text-sm font-medium hover:bg-zinc-800"
           onClick={() => {
-            // focus input to type new username quickly
-            document.querySelector('input')?.focus();
+            if (filter.trim()) {
+              if (canCreate) {
+                void createDirectConversation(filter);
+                setFilter("");
+              } else {
+                setError("Önce kullanıcı adını ayarlayın.");
+              }
+            } else {
+              document.querySelector('input')?.focus();
+            }
           }}
           type="button"
         >
@@ -321,40 +307,6 @@ export function ConversationList({
           <RefreshCcw className={cn("h-3.5 w-3.5", loading && "animate-spin")} />
           Yenile
         </button>
-      </div>
-
-      <div className="space-y-2 border-b px-4 py-3">
-        <div className="flex items-center gap-2">
-          <input
-            className="w-full rounded-lg border bg-zinc-900 px-3 py-2 text-sm outline-none placeholder:text-zinc-500 focus:ring-2 focus:ring-zinc-700"
-            disabled={!canCreate || creating}
-            onChange={(e) => setTargetUsername(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key !== "Enter") return;
-              if (e.nativeEvent.isComposing) return;
-              e.preventDefault();
-              void createDirectConversation();
-            }}
-            placeholder={canCreate ? "kullanıcı adı ile DM başlat" : "önce kullanıcı adını ayarla"}
-            value={targetUsername}
-          />
-          <button
-            className={cn(
-              "inline-flex items-center gap-2 rounded-lg border bg-zinc-900 px-3 py-2 text-sm font-medium hover:bg-zinc-800",
-              (!canCreate || creating) && "opacity-60"
-            )}
-            disabled={!canCreate || creating}
-            onClick={() => void createDirectConversation()}
-            type="button"
-            aria-label="DM başlat"
-          >
-            <Plus className="h-4 w-4" />
-          </button>
-        </div>
-        {createError ? <p className="text-xs text-red-300">{createError}</p> : null}
-        <p className="text-xs text-zinc-500">
-          Not: Grup oluşturma ve davet faz 2. Şimdilik kullanıcı adına göre DM.
-        </p>
       </div>
 
       <div className="flex-1 overflow-y-auto p-2">

@@ -10,6 +10,9 @@
 
   body {
     @apply bg-zinc-950 text-zinc-50 antialiased;
+    /* ensure content sits within the iOS notch / Android cutout when run as a PWA */
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
   }
 
   * {
