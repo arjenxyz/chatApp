@@ -1688,12 +1688,9 @@ export function ChatWindow({
                           ) : null}
 
                           {message.deleted ? (
-                            <>
-                              {console.log("[render] Drawing deleted message:", message.id, "Type was:", message.type)}
-                              <p className="whitespace-pre-wrap break-words text-zinc-500 italic">
-                                Bir mesaj silindi
-                              </p>
-                            </>
+                            <p className="whitespace-pre-wrap break-words text-zinc-500 italic">
+                              Bir mesaj silindi
+                            </p>
                           ) : message.type === "sticker" && message.sticker ? (
                             <div className="flex flex-col items-center">
                               <img
