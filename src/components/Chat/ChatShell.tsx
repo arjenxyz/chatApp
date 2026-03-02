@@ -12,6 +12,7 @@ import { cn } from "@/lib/utils";
 import { useAuth } from "@/providers/AuthProvider";
 
 const USERNAME_REGEX = /^[a-z0-9_]{3,20}$/;
+const SW_READY_TIMEOUT_MS = 10000;
 
 type BeforeInstallPromptEvent = Event & {
   prompt: () => Promise<void>;
@@ -29,6 +30,51 @@ function base64UrlToArrayBuffer(value: string): ArrayBuffer {
   }
 
   return output.buffer;
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timeoutId = window.setTimeout(() => {
+      reject(new Error(message));
+    }, timeoutMs);
+
+    promise
+      .then((value) => {
+        window.clearTimeout(timeoutId);
+        resolve(value);
+      })
+      .catch((error) => {
+        window.clearTimeout(timeoutId);
+        reject(error);
+      });
+  });
+}
+
+async function ensureActiveServiceWorker(
+  registration: ServiceWorkerRegistration,
+  timeoutMessage: string
+): Promise<ServiceWorkerRegistration> {
+  if (registration.active) return registration;
+
+  try {
+    await registration.update();
+  } catch {
+    // no-op
+  }
+
+  if (registration.active) return registration;
+
+  try {
+    const readyRegistration = await withTimeout(navigator.serviceWorker.ready, SW_READY_TIMEOUT_MS, timeoutMessage);
+    if (readyRegistration.active) return readyRegistration;
+  } catch {
+    // fall through to final checks
+  }
+
+  const refreshed = await navigator.serviceWorker.getRegistration();
+  if (refreshed?.active) return refreshed;
+
+  throw new Error(timeoutMessage);
 }
 
 export function ChatShell() {
@@ -119,7 +165,9 @@ export function ChatShell() {
   useEffect(() => {
     if (typeof window === "undefined") return;
 
+    const isTopLevel = window.self === window.top;
     const supported =
+      isTopLevel &&
       "Notification" in window &&
       "serviceWorker" in navigator &&
       "PushManager" in window;
@@ -127,6 +175,8 @@ export function ChatShell() {
     setPushSupported(supported);
     if (supported) {
       setPushPermission(Notification.permission);
+    } else if (!isTopLevel) {
+      setPushError("Bildirim izni iframe içinde çalışmaz. Uygulamayı doğrudan aç.");
     }
   }, []);
 
@@ -231,6 +281,34 @@ export function ChatShell() {
     [supabase, user]
   );
 
+  const getPushRegistration = useCallback(async (): Promise<ServiceWorkerRegistration> => {
+    if (!("serviceWorker" in navigator)) {
+      throw new Error("Service Worker desteklenmiyor.");
+    }
+
+    const existing = (await navigator.serviceWorker.getRegistration()) ?? (await navigator.serviceWorker.getRegistration("/"));
+    if (existing) {
+      return await ensureActiveServiceWorker(
+        existing,
+        "Service Worker hazır hale gelmedi. Sayfayı yenileyip tekrar dene."
+      );
+    }
+
+    try {
+      const registered = await navigator.serviceWorker.register("/sw.js", { scope: "/" });
+      return await ensureActiveServiceWorker(
+        registered,
+        "Service Worker zaman aşımına uğradı. Sayfayı yenileyip tekrar dene."
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "";
+      if (message.toLowerCase().includes("scope")) {
+        throw new Error("Service Worker scope hatası. Farklı domain/alt yol kontrol et.");
+      }
+      throw new Error("Push altyapısı hazır değil. Production/PWA üzerinde tekrar dene.");
+    }
+  }, []);
+
   const syncPushSubscription = useCallback(async () => {
     if (!pushSupported || pushPermission !== "granted" || !user) {
       setPushEnabled(false);
@@ -238,7 +316,7 @@ export function ChatShell() {
     }
 
     try {
-      const registration = await navigator.serviceWorker.ready;
+      const registration = await getPushRegistration();
       const existing = await registration.pushManager.getSubscription();
 
       if (!existing) {
@@ -248,11 +326,12 @@ export function ChatShell() {
 
       await savePushSubscription(existing);
       setPushEnabled(true);
+      setPushError(null);
     } catch (error) {
       setPushEnabled(false);
       setPushError(error instanceof Error ? error.message : "Push senkronizasyonu başarısız.");
     }
-  }, [pushPermission, pushSupported, savePushSubscription, user]);
+  }, [getPushRegistration, pushPermission, pushSupported, savePushSubscription, user]);
 
   const enablePushNotifications = useCallback(async () => {
     if (!pushSupported || !user) return;
@@ -274,7 +353,7 @@ export function ChatShell() {
         return;
       }
 
-      const registration = await navigator.serviceWorker.ready;
+      const registration = await getPushRegistration();
       let subscription = await registration.pushManager.getSubscription();
 
       if (!subscription) {
@@ -286,13 +365,14 @@ export function ChatShell() {
 
       await savePushSubscription(subscription);
       setPushEnabled(true);
+      setPushError(null);
     } catch (error) {
       setPushEnabled(false);
       setPushError(error instanceof Error ? error.message : "Push aktivasyonu başarısız.");
     } finally {
       setPushBusy(false);
     }
-  }, [pushSupported, savePushSubscription, user, vapidPublicKey]);
+  }, [getPushRegistration, pushSupported, savePushSubscription, user, vapidPublicKey]);
 
   useEffect(() => {
     void syncPushSubscription();
