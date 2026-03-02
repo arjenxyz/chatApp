@@ -9,7 +9,8 @@ const nextConfig = {
 // Options passed to the PWA plugin itself.
 const pwaConfig = {
   dest: "public",
-  disable: process.env.NODE_ENV === "development"
+  disable: process.env.NODE_ENV === "development",
+  importScripts: ["/sw-push.js"]
 };
 
 // `withPWA` returns a function that takes the actual Next config so we call it
@@ -18,4 +19,3 @@ const pwaConfig = {
 // array (and therefore numeric keys) and the subsequent webpack plugin
 // getting invalid properties like `reactStrictMode`.
 export default withPWA(pwaConfig)(nextConfig);
-

@@ -47,6 +47,7 @@ type MessageRowRaw = {
   replied_to: MessageReply | MessageReply[] | string | null;
   created_at: string;
   is_read: boolean;
+  deleted?: boolean;
 };
 
 type MessageRow = {
@@ -58,6 +59,7 @@ type MessageRow = {
   replied_to: MessageReply | null;
   created_at: string;
   is_read: boolean;
+  deleted: boolean;
 };
 
 function normalizeParticipant(row: ParticipantRowRaw): ParticipantRow {
@@ -86,7 +88,8 @@ function normalizeMessage(row: MessageRowRaw): MessageRow {
     type: row.type,
     replied_to: normalizeReply(row.replied_to),
     created_at: row.created_at,
-    is_read: row.is_read
+    is_read: row.is_read,
+    deleted: row.deleted ?? false
   };
 }
 
@@ -106,6 +109,24 @@ export function ChatWindow({
   conversationId: string | null;
   onBack?: () => void;
 }) {
+  if (!conversationId) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center p-6 text-center">
+        <p className="text-sm text-zinc-400">Konuşma seçerek mesajlaşmaya başlayabilirsin.</p>
+      </div>
+    );
+  }
+
+  return <ChatWindowInner conversationId={conversationId} onBack={onBack} />;
+}
+
+function ChatWindowInner({
+  conversationId,
+  onBack
+}: {
+  conversationId: string;
+  onBack?: () => void;
+}) {
   const supabase = getSupabaseBrowserClient();
   const { user } = useAuth();
   const { isOnline } = usePresence();
@@ -121,12 +142,27 @@ export function ChatWindow({
   const [replyTarget, setReplyTarget] = useState<MessageRow | null>(null);
   const [editingTarget, setEditingTarget] = useState<MessageRow | null>(null);
   const [activeMessageId, setActiveMessageId] = useState<string | null>(null);
+  const [typingUserIds, setTypingUserIds] = useState<string[]>([]);
+  const [typingDots, setTypingDots] = useState("");
+  const [swipeState, setSwipeState] = useState<{ id: string; offset: number } | null>(null);
 
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const autoScrollRef = useRef(true);
   const sendingRef = useRef(false);
+  const typingChannelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
+  const typingSentRef = useRef(false);
+  const typingSentAtRef = useRef(0);
+  const typingTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  const swipeStartRef = useRef<{
+    id: string;
+    mine: boolean;
+    startX: number;
+    startY: number;
+    locked: boolean;
+    isHorizontal: boolean;
+  } | null>(null);
 
   const trimmedText = text.trim();
   const canSend = Boolean(user && conversationId && trimmedText) && !sending;
@@ -156,6 +192,37 @@ export function ChatWindow({
     return other?.profile?.avatar_url ?? null;
   }, [conversation, participants, user?.id]);
 
+  const typingLabel = useMemo(() => {
+    if (typingUserIds.length === 0) return null;
+
+    const names = typingUserIds
+      .map((userId) => participantsById.get(userId)?.profile?.username || participantsById.get(userId)?.profile?.full_name || null)
+      .filter((value): value is string => Boolean(value));
+
+    if (names.length === 0) return "Birisi yazıyor";
+    if (names.length === 1) return `${names[0]} yazıyor`;
+    return `${names[0]} ve ${names.length - 1} kişi yazıyor`;
+  }, [participantsById, typingUserIds]);
+
+  useEffect(() => {
+    if (typingUserIds.length === 0) {
+      setTypingDots("");
+      return;
+    }
+
+    let step = 1;
+    setTypingDots(".");
+
+    const intervalId = window.setInterval(() => {
+      step = step >= 3 ? 1 : step + 1;
+      setTypingDots(".".repeat(step));
+    }, 350);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [typingUserIds.length]);
+
   const markRead = useCallback(async () => {
     if (!conversationId) return;
     const { error: rpcError } = await supabase.rpc("mark_conversation_read", {
@@ -163,6 +230,124 @@ export function ChatWindow({
     });
     if (rpcError) console.warn("[mark_conversation_read] failed:", rpcError.message);
   }, [conversationId, supabase]);
+
+  const sendTypingStatus = useCallback(
+    async (isTyping: boolean) => {
+      if (!typingChannelRef.current || !user || !conversationId) return;
+
+      try {
+        const status = await typingChannelRef.current.send({
+          type: "broadcast",
+          event: "typing",
+          payload: {
+            conversationId,
+            userId: user.id,
+            isTyping
+          }
+        });
+
+        if (status !== "ok") {
+          console.warn("[typing] broadcast status:", status);
+        }
+      } catch (broadcastError) {
+        console.warn("[typing] broadcast failed:", broadcastError);
+      }
+    },
+    [conversationId, user]
+  );
+
+  const notifyRecipientsForPush = useCallback(
+    async (messageId: string) => {
+      if (!conversationId) return;
+
+      const { data: sessionData } = await supabase.auth.getSession();
+      const accessToken = sessionData.session?.access_token;
+      if (!accessToken) return;
+
+      await fetch("/api/push/message", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`
+        },
+        body: JSON.stringify({
+          conversationId,
+          messageId
+        })
+      });
+    },
+    [conversationId, supabase.auth]
+  );
+
+  const handleSwipeStart = useCallback((event: React.TouchEvent, messageId: string, mine: boolean) => {
+    const touch = event.touches[0];
+    if (!touch) return;
+
+    swipeStartRef.current = {
+      id: messageId,
+      mine,
+      startX: touch.clientX,
+      startY: touch.clientY,
+      locked: false,
+      isHorizontal: false
+    };
+  }, []);
+
+  const handleSwipeMove = useCallback((event: React.TouchEvent) => {
+    if (!swipeStartRef.current) return;
+
+    const touch = event.touches[0];
+    if (!touch) return;
+
+    const state = swipeStartRef.current;
+    const diffX = touch.clientX - state.startX;
+    const diffY = touch.clientY - state.startY;
+
+    if (!state.locked) {
+      if (Math.abs(diffX) < 10 && Math.abs(diffY) < 10) return;
+      state.locked = true;
+      state.isHorizontal = Math.abs(diffX) > Math.abs(diffY);
+      swipeStartRef.current = state;
+    }
+
+    if (!state.isHorizontal) return;
+
+    let allowedOffset = 0;
+    if (!state.mine && diffX > 0) allowedOffset = Math.min(diffX, 72);
+    if (state.mine && diffX < 0) allowedOffset = Math.max(diffX, -72);
+
+    if (allowedOffset !== 0) event.preventDefault();
+    setSwipeState({ id: state.id, offset: allowedOffset });
+  }, []);
+
+  const handleSwipeEnd = useCallback((message: MessageRow) => {
+    const state = swipeStartRef.current;
+    const currentSwipe = swipeState;
+
+    swipeStartRef.current = null;
+    setSwipeState(null);
+
+    if (!state || !currentSwipe || currentSwipe.id !== message.id) return;
+    if (!state.isHorizontal) return;
+
+    if (!state.mine && currentSwipe.offset >= 46) {
+      setReplyTarget(message);
+      setEditingTarget(null);
+      setActiveMessageId(null);
+      return;
+    }
+
+    if (state.mine && currentSwipe.offset <= -46) {
+      setReplyTarget(message);
+      setEditingTarget(null);
+      setActiveMessageId(null);
+    }
+  }, [swipeState]);
+
+  const handleSwipeCancel = useCallback(() => {
+    swipeStartRef.current = null;
+    setSwipeState(null);
+  }, []);
 
   useEffect(() => {
     const textarea = inputRef.current;
@@ -181,6 +366,11 @@ export function ChatWindow({
       input.focus();
     }
   }, []);
+
+  useEffect(() => {
+    if (!replyTarget || editingTarget) return;
+    setTimeout(focusInputWithoutScroll, 0);
+  }, [editingTarget, focusInputWithoutScroll, replyTarget]);
 
   useEffect(() => {
     if (!autoScrollRef.current) return;
@@ -202,11 +392,53 @@ export function ChatWindow({
   }, [conversationId, markRead]);
 
   useEffect(() => {
+    if (!conversationId || !user) return;
+
+    if (!trimmedText) {
+      if (typingSentRef.current) {
+        typingSentRef.current = false;
+        typingSentAtRef.current = Date.now();
+        void sendTypingStatus(false);
+      }
+      return;
+    }
+
+    const now = Date.now();
+    if (!typingSentRef.current || now - typingSentAtRef.current > 1200) {
+      typingSentRef.current = true;
+      typingSentAtRef.current = now;
+      void sendTypingStatus(true);
+    }
+
+    const idleTimer = setTimeout(() => {
+      if (!typingSentRef.current) return;
+      typingSentRef.current = false;
+      typingSentAtRef.current = Date.now();
+      void sendTypingStatus(false);
+    }, 1800);
+
+    return () => {
+      clearTimeout(idleTimer);
+    };
+  }, [conversationId, sendTypingStatus, trimmedText, user]);
+
+  useEffect(() => {
     if (!user || !conversationId) {
       setConversation(null);
       setParticipants([]);
       setMessages([]);
       setError(null);
+      setReplyTarget(null);
+      setEditingTarget(null);
+      setActiveMessageId(null);
+      setTypingUserIds([]);
+      setSwipeState(null);
+      swipeStartRef.current = null;
+      typingChannelRef.current = null;
+      typingSentRef.current = false;
+      typingSentAtRef.current = 0;
+      typingTimersRef.current.forEach((timer) => clearTimeout(timer));
+      typingTimersRef.current.clear();
       return;
     }
 
@@ -218,7 +450,15 @@ export function ChatWindow({
     setReplyTarget(null);
     setEditingTarget(null);
     setActiveMessageId(null);
+    setTypingUserIds([]);
+    setSwipeState(null);
+    swipeStartRef.current = null;
     autoScrollRef.current = true;
+    typingSentRef.current = false;
+    typingSentAtRef.current = 0;
+    const typingTimers = typingTimersRef.current;
+    typingTimers.forEach((timer) => clearTimeout(timer));
+    typingTimers.clear();
 
     let cancelled = false;
 
@@ -247,7 +487,7 @@ export function ChatWindow({
           .eq("conversation_id", conversationId),
         supabase
           .from("messages")
-          .select("id, conversation_id, sender_id, content, type, replied_to(id, content, sender_id), created_at, is_read")
+          .select("id, conversation_id, sender_id, content, type, replied_to(id, content, sender_id), created_at, is_read, deleted")
           .eq("conversation_id", conversationId)
           .order("created_at", { ascending: true })
       ]);
@@ -274,6 +514,38 @@ export function ChatWindow({
 
     const channel = supabase
       .channel(`messages:${conversationId}`)
+      .on("broadcast", { event: "typing" }, (payload) => {
+        const typingPayload = payload.payload as {
+          conversationId?: string;
+          userId?: string;
+          isTyping?: boolean;
+        };
+
+        if (typingPayload.conversationId !== conversationId) return;
+        if (!typingPayload.userId || typingPayload.userId === user.id) return;
+
+        const typingUserId = typingPayload.userId;
+        const isTyping = Boolean(typingPayload.isTyping);
+
+        const existingTimeout = typingTimers.get(typingUserId);
+        if (existingTimeout) {
+          clearTimeout(existingTimeout);
+          typingTimers.delete(typingUserId);
+        }
+
+        if (!isTyping) {
+          setTypingUserIds((prev) => prev.filter((item) => item !== typingUserId));
+          return;
+        }
+
+        setTypingUserIds((prev) => (prev.includes(typingUserId) ? prev : [...prev, typingUserId]));
+
+        const timeout = setTimeout(() => {
+          typingTimers.delete(typingUserId);
+          setTypingUserIds((prev) => prev.filter((item) => item !== typingUserId));
+        }, 2400);
+        typingTimers.set(typingUserId, timeout);
+      })
       .on(
         "postgres_changes",
         {
@@ -308,18 +580,42 @@ export function ChatWindow({
         {
           event: "DELETE",
           schema: "public",
-          table: "messages",
-          filter: `conversation_id=eq.${conversationId}`
+          table: "messages"
         },
         (payload) => {
-          const deleted = payload.old as { id: string };
-          setMessages((prev) => prev.filter((item) => item.id !== deleted.id));
+          const deleted = payload.old as { id?: string; conversation_id?: string | null };
+          if (!deleted.id) return;
+
+          setMessages((prev) =>
+            prev.map((item) =>
+              item.id === deleted.id ? { ...item, content: "", deleted: true } : item
+            )
+          );
+
+          setReplyTarget((prev) => (prev?.id === deleted.id ? null : prev));
+          setEditingTarget((prev) => {
+            if (prev?.id === deleted.id) {
+              setText("");
+              return null;
+            }
+            return prev;
+          });
+          setActiveMessageId((prev) => (prev === deleted.id ? null : prev));
         }
       )
       .subscribe();
 
+    typingChannelRef.current = channel;
+
     return () => {
       cancelled = true;
+      if (typingChannelRef.current === channel) {
+        typingChannelRef.current = null;
+      }
+      typingSentRef.current = false;
+      typingSentAtRef.current = 0;
+      typingTimers.forEach((timer) => clearTimeout(timer));
+      typingTimers.clear();
       void supabase.removeChannel(channel);
     };
   }, [conversationId, markRead, supabase, user]);
@@ -329,13 +625,21 @@ export function ChatWindow({
       if (!user) return;
       if (message.sender_id !== user.id) return;
 
-      const { error: deleteError } = await supabase.from("messages").delete().eq("id", message.id).eq("sender_id", user.id);
+      // mark message as deleted instead of removing it from the database
+      const { error: deleteError } = await supabase
+        .from("messages")
+        .update({ content: "", deleted: true })
+        .eq("id", message.id)
+        .eq("sender_id", user.id);
       if (deleteError) {
         setError(deleteError.message);
         return;
       }
 
-      setMessages((prev) => prev.filter((item) => item.id !== message.id));
+      // reflect change locally
+      setMessages((prev) =>
+        prev.map((item) => (item.id === message.id ? { ...item, content: "", deleted: true } : item))
+      );
       if (replyTarget?.id === message.id) setReplyTarget(null);
       if (editingTarget?.id === message.id) {
         setEditingTarget(null);
@@ -392,9 +696,8 @@ export function ChatWindow({
       const { data: inserted, error: insertError } = await supabase
         .from("messages")
         .insert(payload)
-        .select("id, conversation_id, sender_id, content, type, replied_to(id, content, sender_id), created_at, is_read")
+        .select("id, conversation_id, sender_id, content, type, replied_to(id, content, sender_id), created_at, is_read, deleted")
         .single();
-
       if (insertError) {
         setError(insertError.message);
         return;
@@ -403,6 +706,15 @@ export function ChatWindow({
       if (inserted) {
         const nextMessage = normalizeMessage(inserted as MessageRowRaw);
         setMessages((prev) => (prev.some((item) => item.id === nextMessage.id) ? prev : [...prev, nextMessage]));
+        void notifyRecipientsForPush(nextMessage.id).catch((pushError) => {
+          console.warn("[push] notify failed:", pushError);
+        });
+      }
+
+      if (typingSentRef.current) {
+        typingSentRef.current = false;
+        typingSentAtRef.current = Date.now();
+        void sendTypingStatus(false);
       }
 
       setText("");
@@ -413,7 +725,17 @@ export function ChatWindow({
       sendingRef.current = false;
       setSending(false);
     }
-  }, [conversationId, editingTarget, focusInputWithoutScroll, replyTarget, supabase, trimmedText, user]);
+  }, [
+    conversationId,
+    editingTarget,
+    focusInputWithoutScroll,
+    notifyRecipientsForPush,
+    replyTarget,
+    sendTypingStatus,
+    supabase,
+    trimmedText,
+    user
+  ]);
 
   if (!conversationId) {
     return (
@@ -449,8 +771,14 @@ export function ChatWindow({
 
           <div className="min-w-0">
             <p className="truncate text-sm font-semibold text-zinc-100">{title}</p>
-            <p className="truncate text-xs text-zinc-500">
-              {otherUserId ? (isOnline(otherUserId) ? "aktif" : "çevrimdışı") : "grup sohbeti"}
+            <p className={cn("truncate text-xs", typingLabel ? "text-emerald-400" : "text-zinc-500")}>
+              {typingLabel
+                ? `${typingLabel}${typingDots}`
+                : otherUserId
+                  ? isOnline(otherUserId)
+                    ? "aktif"
+                    : "çevrimdışı"
+                  : "grup sohbeti"}
             </p>
           </div>
         </div>
@@ -483,6 +811,9 @@ export function ChatWindow({
                 index === 0 ||
                 new Date(messages[index - 1].created_at).toDateString() !== new Date(message.created_at).toDateString();
               const active = activeMessageId === message.id;
+              const swipeOffset = swipeState?.id === message.id ? swipeState.offset : 0;
+              const swipeActive = swipeOffset !== 0;
+              const swipeReady = !mine ? swipeOffset >= 46 : swipeOffset <= -46;
 
               return (
                 <li key={message.id}>
@@ -498,105 +829,139 @@ export function ChatWindow({
                     <div className={cn("max-w-[88%] md:max-w-[72%]", mine ? "items-end" : "items-start")}>
                       {!mine ? <p className="mb-1 px-1 text-[11px] text-zinc-500">{senderName}</p> : null}
 
-                      <div
-                        id={`msg-${message.id}`}
-                        className={cn(
-                          "rounded-2xl border px-3 py-2 text-sm break-words break-all",
-                          mine
-                            ? "border-blue-900/60 bg-blue-600/85 text-white"
-                            : "border-zinc-800 bg-zinc-900/70 text-zinc-100",
-                          active && "ring-1 ring-zinc-500"
-                        )}
-                        onClick={() => setActiveMessageId((prev) => (prev === message.id ? null : message.id))}
-                        role="button"
-                        tabIndex={0}
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter" || event.key === " ") {
-                            event.preventDefault();
-                            setActiveMessageId((prev) => (prev === message.id ? null : message.id));
-                          }
-                        }}
-                      >
-                        {message.replied_to ? (
-                          <button
+                      <div className="relative">
+                        <div
+                          className={cn(
+                            "pointer-events-none absolute inset-y-0 flex items-center",
+                            mine ? "left-2 justify-start" : "right-2 justify-end"
+                          )}
+                        >
+                          <Reply
                             className={cn(
-                              "mb-2 block w-full rounded-lg border px-2 py-1 text-left text-[11px]",
-                              mine ? "border-blue-400/40 bg-blue-500/40" : "border-zinc-700 bg-zinc-800/70"
+                              "h-4 w-4 transition-all",
+                              swipeActive ? "opacity-100" : "opacity-0",
+                              swipeReady ? "scale-110 text-emerald-300" : "text-zinc-500"
                             )}
-                            onClick={() => {
-                              const target = document.getElementById(`msg-${message.replied_to?.id}`);
-                              target?.scrollIntoView({ behavior: "smooth", block: "center" });
-                            }}
-                            type="button"
+                          />
+                        </div>
+
+                        <div
+                          id={`msg-${message.id}`}
+                          className={cn(
+                            "rounded-2xl border px-3 py-2 text-sm break-words break-all",
+                            message.deleted
+                              ? "border-zinc-700 bg-zinc-800/60 text-zinc-400 italic"
+                              : mine
+                              ? "border-blue-900/60 bg-blue-600/85 text-white"
+                              : "border-zinc-800 bg-zinc-900/70 text-zinc-100",
+                            active && "ring-1 ring-zinc-500",
+                            swipeActive ? "transition-none" : "transition-transform duration-150 ease-out"
+                          )}
+                          onClick={() => setActiveMessageId((prev) => (prev === message.id ? null : message.id))}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter" || event.key === " ") {
+                              event.preventDefault();
+                              setActiveMessageId((prev) => (prev === message.id ? null : message.id));
+                            }
+                          }}
+                          onTouchCancel={handleSwipeCancel}
+                          onTouchEnd={() => handleSwipeEnd(message)}
+                          onTouchMove={handleSwipeMove}
+                          onTouchStart={(event) => handleSwipeStart(event, message.id, mine)}
+                          role="button"
+                          style={swipeActive ? { transform: `translateX(${swipeOffset}px)` } : undefined}
+                          tabIndex={0}
+                        >
+                          {message.replied_to ? (
+                            <button
+                              className={cn(
+                                "mb-2 block w-full rounded-lg border px-2 py-1 text-left text-[11px]",
+                                mine ? "border-blue-400/40 bg-blue-500/40" : "border-zinc-700 bg-zinc-800/70"
+                              )}
+                              onClick={() => {
+                                const target = document.getElementById(`msg-${message.replied_to?.id}`);
+                                target?.scrollIntoView({ behavior: "smooth", block: "center" });
+                              }}
+                              type="button"
+                            >
+                              <span className="font-semibold">
+                                {message.replied_to.sender_id === user?.id
+                                  ? "Sen"
+                                  : participantsById.get(message.replied_to.sender_id)?.profile?.username || "Kullanıcı"}
+                                :
+                              </span>{" "}
+                              {message.replied_to.content}
+                            </button>
+                          ) : null}
+
+                          <p className="whitespace-pre-wrap break-words">
+                            {message.deleted ? "Bir mesaj silindi" : message.content}
+                          </p>
+
+                          <div
+                            className={cn(
+                              "mt-1 flex items-center justify-end gap-2 text-[10px]",
+                              mine ? "text-blue-100/80" : "text-zinc-500"
+                            )}
                           >
-                            <span className="font-semibold">
-                              {message.replied_to.sender_id === user?.id
-                                ? "Sen"
-                                : participantsById.get(message.replied_to.sender_id)?.profile?.username || "Kullanıcı"}
-                              :
-                            </span>{" "}
-                            {message.replied_to.content}
-                          </button>
-                        ) : null}
-
-                        <p className="whitespace-pre-wrap break-words">{message.content}</p>
-
-                        <div className={cn("mt-1 flex items-center justify-end gap-2 text-[10px]", mine ? "text-blue-100/80" : "text-zinc-500")}>
-                          <span>
-                            {new Date(message.created_at).toLocaleTimeString("tr-TR", {
-                              hour: "2-digit",
-                              minute: "2-digit"
-                            })}
-                          </span>
-                          {mine ? <span>{message.is_read ? "okundu" : "gönderildi"}</span> : null}
+                            <span>
+                              {new Date(message.created_at).toLocaleTimeString("tr-TR", {
+                                hour: "2-digit",
+                                minute: "2-digit"
+                              })}
+                            </span>
+                            {mine ? <span>{message.is_read ? "okundu" : "gönderildi"}</span> : null}
+                          </div>
                         </div>
                       </div>
 
-                      <div className={cn("mt-1 flex items-center gap-1 px-1", active ? "opacity-100" : "opacity-0 group-hover:opacity-100")}>
-                        <button
-                          className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900 text-zinc-300 hover:bg-zinc-800"
-                          onClick={() => setReplyTarget(message)}
-                          title="Yanıtla"
-                          type="button"
-                        >
-                          <Reply className="h-3.5 w-3.5" />
-                        </button>
-                        <button
-                          className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900 text-zinc-300 hover:bg-zinc-800"
-                          onClick={() => {
-                            if (navigator.clipboard?.writeText) void navigator.clipboard.writeText(message.content);
-                          }}
-                          title="Kopyala"
-                          type="button"
-                        >
-                          <Copy className="h-3.5 w-3.5" />
-                        </button>
-                        {mine ? (
+                      {!message.deleted && (
+                        <div className={cn("mt-1 flex items-center gap-1 px-1", active ? "opacity-100" : "opacity-0 group-hover:opacity-100")}>
+                          <button
+                            className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900 text-zinc-300 hover:bg-zinc-800"
+                            onClick={() => setReplyTarget(message)}
+                            title="Yanıtla"
+                            type="button"
+                          >
+                            <Reply className="h-3.5 w-3.5" />
+                          </button>
                           <button
                             className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900 text-zinc-300 hover:bg-zinc-800"
                             onClick={() => {
-                              setEditingTarget(message);
-                              setReplyTarget(null);
-                              setText(message.content);
-                              setTimeout(focusInputWithoutScroll, 0);
+                              if (navigator.clipboard?.writeText) void navigator.clipboard.writeText(message.content);
                             }}
-                            title="Düzenle"
+                            title="Kopyala"
                             type="button"
                           >
-                            <Pencil className="h-3.5 w-3.5" />
+                            <Copy className="h-3.5 w-3.5" />
                           </button>
-                        ) : null}
-                        {mine ? (
-                          <button
-                            className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-red-900/60 bg-red-950/40 text-red-300 hover:bg-red-900/40"
-                            onClick={() => void deleteMessage(message)}
-                            title="Sil"
-                            type="button"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </button>
-                        ) : null}
-                      </div>
+                          {mine ? (
+                            <button
+                              className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900 text-zinc-300 hover:bg-zinc-800"
+                              onClick={() => {
+                                setEditingTarget(message);
+                                setReplyTarget(null);
+                                setText(message.content);
+                                setTimeout(focusInputWithoutScroll, 0);
+                              }}
+                              title="Düzenle"
+                              type="button"
+                            >
+                              <Pencil className="h-3.5 w-3.5" />
+                            </button>
+                          ) : null}
+                          {mine ? (
+                            <button
+                              className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-red-900/60 bg-red-950/40 text-red-300 hover:bg-red-900/40"
+                              onClick={() => void deleteMessage(message)}
+                              title="Sil"
+                              type="button"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          ) : null}
+                        </div>
+                      )}
                     </div>
                   </div>
                 </li>

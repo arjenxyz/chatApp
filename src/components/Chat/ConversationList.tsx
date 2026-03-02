@@ -34,6 +34,7 @@ type LastMessageRow = {
   content: string;
   sender_id: string;
   created_at: string;
+  deleted?: boolean;
 };
 
 type ConversationItem = {
@@ -111,7 +112,7 @@ export function ConversationList({
         .in("conversation_id", conversationIds),
       supabase
         .from("messages")
-        .select("conversation_id, content, sender_id, created_at")
+        .select("conversation_id, content, sender_id, created_at, deleted")
         .in("conversation_id", conversationIds)
         .order("created_at", { ascending: false })
     ]);
@@ -150,10 +151,14 @@ export function ConversationList({
       const title = conversation.is_group ? conversation.name || "Grup Sohbeti" : baseTitle;
 
       let previewText: string | null = null;
-      if (lastMessage?.content) {
-        const prefix = lastMessage.sender_id === user.id ? "Sen: " : "";
-        const sliced = lastMessage.content.length > 60 ? `${lastMessage.content.slice(0, 60)}...` : lastMessage.content;
-        previewText = `${prefix}${sliced}`;
+      if (lastMessage) {
+        if (lastMessage.deleted) {
+          previewText = "Bir mesaj silindi";
+        } else if (lastMessage.content) {
+          const prefix = lastMessage.sender_id === user.id ? "Sen: " : "";
+          const sliced = lastMessage.content.length > 60 ? `${lastMessage.content.slice(0, 60)}...` : lastMessage.content;
+          previewText = `${prefix}${sliced}`;
+        }
       }
 
       return {

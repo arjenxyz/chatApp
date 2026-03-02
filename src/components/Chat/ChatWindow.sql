@@ -33,11 +33,28 @@ create table if not exists public.messages (
   is_read boolean not null default false
 );
 alter table public.messages add column if not exists replied_to uuid references public.messages (id) on delete set null;
+-- flag used when a user deletes a message; we keep the row and show placeholder in UI
+alter table public.messages add column if not exists deleted boolean not null default false;
+alter table public.messages replica identity full;
 create index if not exists messages_conversation_id_created_at_idx on public.messages (conversation_id, created_at);
+
+create table if not exists public.push_subscriptions (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.profiles (id) on delete cascade,
+  endpoint text not null unique,
+  p256dh text not null,
+  auth text not null,
+  user_agent text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index if not exists push_subscriptions_user_id_idx on public.push_subscriptions (user_id);
+create index if not exists push_subscriptions_updated_at_idx on public.push_subscriptions (updated_at desc);
 
 grant select, insert, update, delete on table public.conversations to authenticated;
 grant select, insert, update, delete on table public.participants to authenticated;
 grant select, insert, update, delete on table public.messages to authenticated;
+grant select, insert, update, delete on table public.push_subscriptions to authenticated;
 
 do $$
 begin
@@ -57,6 +74,7 @@ end $$;
 alter table public.conversations enable row level security;
 alter table public.participants enable row level security;
 alter table public.messages enable row level security;
+alter table public.push_subscriptions enable row level security;
 
 create or replace function public.is_conversation_member(p_conversation uuid)
 returns boolean
@@ -171,6 +189,35 @@ on public.messages
 for delete
 to authenticated
 using (sender_id = auth.uid());
+
+drop policy if exists "Users can view own push subscriptions" on public.push_subscriptions;
+create policy "Users can view own push subscriptions"
+on public.push_subscriptions
+for select
+to authenticated
+using (user_id = auth.uid());
+
+drop policy if exists "Users can insert own push subscriptions" on public.push_subscriptions;
+create policy "Users can insert own push subscriptions"
+on public.push_subscriptions
+for insert
+to authenticated
+with check (user_id = auth.uid());
+
+drop policy if exists "Users can update own push subscriptions" on public.push_subscriptions;
+create policy "Users can update own push subscriptions"
+on public.push_subscriptions
+for update
+to authenticated
+using (user_id = auth.uid())
+with check (user_id = auth.uid());
+
+drop policy if exists "Users can delete own push subscriptions" on public.push_subscriptions;
+create policy "Users can delete own push subscriptions"
+on public.push_subscriptions
+for delete
+to authenticated
+using (user_id = auth.uid());
 
 create or replace function public.mark_conversation_read(p_conversation_id uuid)
 returns void
