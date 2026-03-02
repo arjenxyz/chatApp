@@ -172,9 +172,26 @@ export function ChatWindow({
     textarea.style.height = `${Math.min(textarea.scrollHeight, 160)}px`;
   }, [text]);
 
+  const focusInputWithoutScroll = useCallback(() => {
+    const input = inputRef.current;
+    if (!input) return;
+    try {
+      input.focus({ preventScroll: true });
+    } catch {
+      input.focus();
+    }
+  }, []);
+
   useEffect(() => {
     if (!autoScrollRef.current) return;
-    bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    const container = scrollRef.current;
+    if (!container) return;
+
+    const inputFocused = typeof document !== "undefined" && document.activeElement === inputRef.current;
+    container.scrollTo({
+      top: container.scrollHeight,
+      behavior: inputFocused ? "auto" : "smooth"
+    });
   }, [messages.length]);
 
   useEffect(() => {
@@ -391,12 +408,12 @@ export function ChatWindow({
       setText("");
       setReplyTarget(null);
       setActiveMessageId(null);
-      setTimeout(() => inputRef.current?.focus(), 0);
+      setTimeout(focusInputWithoutScroll, 0);
     } finally {
       sendingRef.current = false;
       setSending(false);
     }
-  }, [conversationId, editingTarget, replyTarget, supabase, trimmedText, user]);
+  }, [conversationId, editingTarget, focusInputWithoutScroll, replyTarget, supabase, trimmedText, user]);
 
   if (!conversationId) {
     return (
@@ -561,7 +578,7 @@ export function ChatWindow({
                               setEditingTarget(message);
                               setReplyTarget(null);
                               setText(message.content);
-                              setTimeout(() => inputRef.current?.focus(), 0);
+                              setTimeout(focusInputWithoutScroll, 0);
                             }}
                             title="Düzenle"
                             type="button"

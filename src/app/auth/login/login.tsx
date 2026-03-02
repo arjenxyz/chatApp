@@ -27,14 +27,19 @@ export default function Login() {
   const signInWithGoogle = async () => {
     setError(null);
     setNotice(null);
-    const { error: oauthError } = await supabase.auth.signInWithOAuth({
-      provider: "google",
-      options: {
-        redirectTo: origin ? `${origin}/auth/callback` : undefined
+    setSubmitting(true);
+    try {
+      const { error: oauthError } = await supabase.auth.signInWithOAuth({
+        provider: "google",
+        options: {
+          redirectTo: origin ? `${origin}/auth/callback` : undefined
+        }
+      });
+      if (oauthError) {
+        setError(oauthError.message);
       }
-    });
-    if (oauthError) {
-      setError(oauthError.message);
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -48,6 +53,10 @@ export default function Login() {
 
     if (!trimmedEmail) {
       setError("E-posta gerekli.");
+      return;
+    }
+    if (trimmedUsername && !/^[a-z0-9_]{3,20}$/.test(trimmedUsername)) {
+      setError("Kullanıcı adı için 3-20 karakter: a-z, 0-9, _");
       return;
     }
 
@@ -71,18 +80,18 @@ export default function Login() {
 
   if (!loading && user) {
     return (
-      <div className="rounded-lg border bg-zinc-900/40 p-4">
+      <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-4">
         <p className="text-sm text-zinc-200">Zaten giriş yaptın.</p>
         <div className="mt-3 flex gap-2">
           <button
-            className="rounded-lg border bg-zinc-900 px-3 py-2 text-sm font-medium hover:bg-zinc-800"
+            className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm font-medium hover:bg-zinc-800"
             onClick={() => router.push("/chat")}
             type="button"
           >
             Sohbete Git
           </button>
           <Link
-            className="rounded-lg border bg-zinc-900 px-3 py-2 text-sm font-medium hover:bg-zinc-800"
+            className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm font-medium hover:bg-zinc-800"
             href="/"
           >
             Ana Sayfa
@@ -99,7 +108,7 @@ export default function Login() {
           E-posta
         </label>
         <input
-          className="w-full rounded-lg border bg-zinc-900 px-3 py-2 text-sm outline-none placeholder:text-zinc-500 focus:ring-2 focus:ring-zinc-700"
+          className="w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm outline-none placeholder:text-zinc-500 focus:border-zinc-700"
           id="email"
           inputMode="email"
           onChange={(e) => setEmail(e.target.value)}
@@ -115,7 +124,7 @@ export default function Login() {
           Kullanıcı adı (opsiyonel)
         </label>
         <input
-          className="w-full rounded-lg border bg-zinc-900 px-3 py-2 text-sm outline-none placeholder:text-zinc-500 focus:ring-2 focus:ring-zinc-700"
+          className="w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm outline-none placeholder:text-zinc-500 focus:border-zinc-700"
           id="username"
           onChange={(e) => setUsername(e.target.value)}
           placeholder="ilk girişte önerilir"
@@ -136,7 +145,7 @@ export default function Login() {
 
       <button
         className={cn(
-          "w-full rounded-lg border bg-zinc-900 px-3 py-2 text-sm font-medium hover:bg-zinc-800",
+          "w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm font-medium text-zinc-100 hover:bg-zinc-800",
           (submitting || !origin) && "opacity-60"
         )}
         disabled={submitting || !origin}
@@ -146,7 +155,11 @@ export default function Login() {
       </button>
 
       <button
-        className="mt-2 w-full rounded-lg border bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-500"
+        className={cn(
+          "mt-2 w-full rounded-xl border border-blue-700 bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-500",
+          submitting && "opacity-60"
+        )}
+        disabled={submitting}
         onClick={signInWithGoogle}
         type="button"
       >
