@@ -1127,6 +1127,7 @@ export function ChatWindow({
           const withReply = await hydrateRealtimeReply(rawMessage);
           const nextMessage = normalizeMessage(withReply);
 
+          console.log("[realtime-insert] New message received:", nextMessage.id, "Replied to:", nextMessage.replied_to?.id, "Current reply target:", replyTarget?.id);
           setMessages((prev) => (prev.some((item) => item.id === nextMessage.id) ? prev : [...prev, nextMessage]));
           if (nextMessage.sender_id !== user.id) void markRead();
         }
@@ -1155,8 +1156,10 @@ export function ChatWindow({
           }
           
           const nextMessage = normalizeMessage(rawMessage);
+          console.log("[realtime-update] Message updated:", nextMessage.id, "Deleted:", nextMessage.deleted, "Current reply target:", replyTarget?.id);
           setMessages((prev) => prev.map((item) => (item.id === nextMessage.id ? { ...item, ...nextMessage } : item)));
           if (nextMessage.deleted) {
+            console.log("[realtime-update] Message is deleted, clearing reply if it's the target");
             setReplyTarget((prev) => (prev?.id === nextMessage.id ? null : prev));
             setEditingTarget((prev) => {
               if (prev?.id === nextMessage.id) {
@@ -1186,6 +1189,7 @@ export function ChatWindow({
             )
           );
 
+          console.log("[realtime-delete] Message deleted:", deleted.id, "Current reply target:", replyTarget?.id);
           setReplyTarget((prev) => (prev?.id === deleted.id ? null : prev));
           setEditingTarget((prev) => {
             if (prev?.id === deleted.id) {
@@ -1729,7 +1733,10 @@ export function ChatWindow({
                         <div className={cn("mt-1 flex items-center gap-1 px-1", active ? "opacity-100" : "opacity-0 group-hover:opacity-100")}>
                           <button
                             className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900 text-zinc-300 hover:bg-zinc-800"
-                            onClick={() => setReplyTarget(message)}
+                            onClick={() => {
+                              console.log("[reply-click] Setting reply target to message:", message.id, message.content);
+                              setReplyTarget(message);
+                            }}
                             title="Yanıtla"
                             type="button"
                           >
@@ -1787,9 +1794,13 @@ export function ChatWindow({
           <p className="truncate">
             {editingTarget ? `Düzenleniyor: ${editingTarget.content}` : `Yanıtlanıyor: ${replyTarget?.content ?? ""}`}
           </p>
+          {replyTarget && !editingTarget && (
+            <span className="ml-2 text-[10px] text-zinc-500">(ID: {replyTarget.id.slice(0, 8)})</span>
+          )}
           <button
             className="rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-zinc-300 hover:bg-zinc-800"
             onClick={() => {
+              console.log("[reply-clear] Clearing reply target");
               setReplyTarget(null);
               setEditingTarget(null);
               if (editingTarget) setText("");
