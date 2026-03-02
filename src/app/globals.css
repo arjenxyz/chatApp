@@ -24,6 +24,8 @@
       linear-gradient(180deg, rgba(24, 24, 27, 0.75) 0%, rgba(9, 9, 11, 1) 45%);
     @apply antialiased;
     padding-top: env(safe-area-inset-top);
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
     padding-bottom: env(safe-area-inset-bottom);
   }
 
@@ -32,6 +34,11 @@
     overflow: hidden;
     overscroll-behavior: none;
     touch-action: manipulation;
+  }
+
+  html {
+    overscroll-behavior-y: none;
+    -webkit-text-size-adjust: 100%;
   }
 
   * {

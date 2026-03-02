@@ -50,6 +50,20 @@ type ConversationItem = {
 
 const USERNAME_REGEX = /^[a-z0-9_]{3,20}$/;
 
+function buildPreviewText(message: Pick<LastMessageRow, "content" | "sender_id" | "deleted">, currentUserId: string): string {
+  if (message.deleted) {
+    return "Bir mesaj silindi";
+  }
+
+  if (!message.content) {
+    return "Mesaj yok";
+  }
+
+  const prefix = message.sender_id === currentUserId ? "Sen: " : "";
+  const sliced = message.content.length > 60 ? `${message.content.slice(0, 60)}...` : message.content;
+  return `${prefix}${sliced}`;
+}
+
 export function ConversationList({
   selectedConversationId,
   onSelectConversation
@@ -149,17 +163,7 @@ export function ConversationList({
       const lastMessage = lastMessageByConversation.get(conversation.id) ?? null;
       const baseTitle = otherProfile?.username || otherProfile?.full_name || "Kullanıcı";
       const title = conversation.is_group ? conversation.name || "Grup Sohbeti" : baseTitle;
-
-      let previewText: string | null = null;
-      if (lastMessage) {
-        if (lastMessage.deleted) {
-          previewText = "Bir mesaj silindi";
-        } else if (lastMessage.content) {
-          const prefix = lastMessage.sender_id === user.id ? "Sen: " : "";
-          const sliced = lastMessage.content.length > 60 ? `${lastMessage.content.slice(0, 60)}...` : lastMessage.content;
-          previewText = `${prefix}${sliced}`;
-        }
-      }
+      const previewText = lastMessage ? buildPreviewText(lastMessage, user.id) : null;
 
       return {
         id: conversation.id,
@@ -169,9 +173,11 @@ export function ConversationList({
         otherUserId: conversation.is_group ? null : other?.user_id ?? null,
         avatarUrl: conversation.is_group ? null : otherProfile?.avatar_url ?? null,
         lastMessage: previewText,
-        createdAt: conversation.created_at
+        createdAt: lastMessage?.created_at ?? conversation.created_at
       };
     });
+
+    nextItems.sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
 
     setItems(nextItems);
     setLoading(false);
@@ -179,6 +185,121 @@ export function ConversationList({
 
   useEffect(() => {
     void refresh();
+  }, [refresh]);
+
+  const patchLastMessageFromRealtime = useCallback(
+    (message: {
+      conversation_id?: string | null;
+      sender_id?: string | null;
+      content?: string | null;
+      deleted?: boolean | null;
+      created_at?: string | null;
+    }) => {
+      if (!user || !message.conversation_id) return;
+
+      setItems((prev) => {
+        const index = prev.findIndex((item) => item.id === message.conversation_id);
+        if (index < 0) return prev;
+
+        const current = prev[index];
+        const nextItem: ConversationItem = {
+          ...current,
+          lastMessage: buildPreviewText(
+            {
+              content: message.content ?? "",
+              sender_id: message.sender_id ?? "",
+              deleted: Boolean(message.deleted)
+            },
+            user.id
+          ),
+          createdAt: message.created_at ?? current.createdAt
+        };
+
+        const next = [...prev];
+        next.splice(index, 1);
+        next.unshift(nextItem);
+        return next;
+      });
+    },
+    [user]
+  );
+
+  useEffect(() => {
+    if (!user) return;
+
+    const channel = supabase
+      .channel(`conversation-list:${user.id}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "participants",
+          filter: `user_id=eq.${user.id}`
+        },
+        () => {
+          void refresh();
+        }
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "DELETE",
+          schema: "public",
+          table: "participants",
+          filter: `user_id=eq.${user.id}`
+        },
+        () => {
+          void refresh();
+        }
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "messages"
+        },
+        (payload) => {
+          patchLastMessageFromRealtime(payload.new as LastMessageRow);
+        }
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "messages"
+        },
+        (payload) => {
+          patchLastMessageFromRealtime(payload.new as LastMessageRow);
+        }
+      )
+      .subscribe();
+
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+  }, [patchLastMessageFromRealtime, refresh, supabase, user]);
+
+  useEffect(() => {
+    const onFocus = () => {
+      void refresh();
+    };
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        void refresh();
+      }
+    };
+
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
   }, [refresh]);
 
   const filteredItems = useMemo(() => {

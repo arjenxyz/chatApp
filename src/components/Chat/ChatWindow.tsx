@@ -104,27 +104,11 @@ function formatDateLabel(dateIso: string): string {
 
 export function ChatWindow({
   conversationId,
+  networkOnline = true,
   onBack
 }: {
   conversationId: string | null;
-  onBack?: () => void;
-}) {
-  if (!conversationId) {
-    return (
-      <div className="flex h-full flex-col items-center justify-center p-6 text-center">
-        <p className="text-sm text-zinc-400">Konuşma seçerek mesajlaşmaya başlayabilirsin.</p>
-      </div>
-    );
-  }
-
-  return <ChatWindowInner conversationId={conversationId} onBack={onBack} />;
-}
-
-function ChatWindowInner({
-  conversationId,
-  onBack
-}: {
-  conversationId: string;
+  networkOnline?: boolean;
   onBack?: () => void;
 }) {
   const supabase = getSupabaseBrowserClient();
@@ -165,7 +149,7 @@ function ChatWindowInner({
   } | null>(null);
 
   const trimmedText = text.trim();
-  const canSend = Boolean(user && conversationId && trimmedText) && !sending;
+  const canSend = Boolean(user && conversationId && trimmedText && networkOnline) && !sending;
 
   const participantsById = useMemo(() => {
     const map = new Map<string, ParticipantRow>();
@@ -264,7 +248,7 @@ function ChatWindowInner({
       const accessToken = sessionData.session?.access_token;
       if (!accessToken) return;
 
-      await fetch("/api/push/message", {
+      const response = await fetch("/api/push/message", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -273,8 +257,13 @@ function ChatWindowInner({
         body: JSON.stringify({
           conversationId,
           messageId
-        })
+        }),
+        keepalive: true
       });
+
+      if (!response.ok) {
+        console.warn("[push] notify api status:", response.status);
+      }
     },
     [conversationId, supabase.auth]
   );
@@ -437,8 +426,9 @@ function ChatWindowInner({
       typingChannelRef.current = null;
       typingSentRef.current = false;
       typingSentAtRef.current = 0;
-      typingTimersRef.current.forEach((timer) => clearTimeout(timer));
-      typingTimersRef.current.clear();
+      const typingTimers = typingTimersRef.current;
+      typingTimers.forEach((timer) => clearTimeout(timer));
+      typingTimers.clear();
       return;
     }
 
@@ -573,6 +563,17 @@ function ChatWindowInner({
         (payload) => {
           const nextMessage = normalizeMessage(payload.new as MessageRowRaw);
           setMessages((prev) => prev.map((item) => (item.id === nextMessage.id ? { ...item, ...nextMessage } : item)));
+          if (nextMessage.deleted) {
+            setReplyTarget((prev) => (prev?.id === nextMessage.id ? null : prev));
+            setEditingTarget((prev) => {
+              if (prev?.id === nextMessage.id) {
+                setText("");
+                return null;
+              }
+              return prev;
+            });
+            setActiveMessageId((prev) => (prev === nextMessage.id ? null : prev));
+          }
         }
       )
       .on(
@@ -652,6 +653,10 @@ function ChatWindowInner({
 
   const send = useCallback(async () => {
     if (!user || !conversationId || !trimmedText) return;
+    if (!networkOnline) {
+      setError("Bağlantı yok. Mesaj gönderilemedi.");
+      return;
+    }
     if (sendingRef.current) return;
 
     sendingRef.current = true;
@@ -734,7 +739,8 @@ function ChatWindowInner({
     sendTypingStatus,
     supabase,
     trimmedText,
-    user
+    user,
+    networkOnline
   ]);
 
   if (!conversationId) {
@@ -771,14 +777,21 @@ function ChatWindowInner({
 
           <div className="min-w-0">
             <p className="truncate text-sm font-semibold text-zinc-100">{title}</p>
-            <p className={cn("truncate text-xs", typingLabel ? "text-emerald-400" : "text-zinc-500")}>
-              {typingLabel
-                ? `${typingLabel}${typingDots}`
-                : otherUserId
-                  ? isOnline(otherUserId)
-                    ? "aktif"
-                    : "çevrimdışı"
-                  : "grup sohbeti"}
+            <p
+              className={cn(
+                "truncate text-xs",
+                !networkOnline ? "text-amber-300" : typingLabel ? "text-emerald-400" : "text-zinc-500"
+              )}
+            >
+              {!networkOnline
+                ? "bağlantı yok"
+                : typingLabel
+                  ? `${typingLabel}${typingDots}`
+                  : otherUserId
+                    ? isOnline(otherUserId)
+                      ? "aktif"
+                      : "çevrimdışı"
+                    : "grup sohbeti"}
             </p>
           </div>
         </div>
@@ -814,6 +827,7 @@ function ChatWindowInner({
               const swipeOffset = swipeState?.id === message.id ? swipeState.offset : 0;
               const swipeActive = swipeOffset !== 0;
               const swipeReady = !mine ? swipeOffset >= 46 : swipeOffset <= -46;
+              const swipeAllowed = !message.deleted;
 
               return (
                 <li key={message.id}>
@@ -839,7 +853,7 @@ function ChatWindowInner({
                           <Reply
                             className={cn(
                               "h-4 w-4 transition-all",
-                              swipeActive ? "opacity-100" : "opacity-0",
+                              swipeActive && swipeAllowed ? "opacity-100" : "opacity-0",
                               swipeReady ? "scale-110 text-emerald-300" : "text-zinc-500"
                             )}
                           />
@@ -864,10 +878,10 @@ function ChatWindowInner({
                               setActiveMessageId((prev) => (prev === message.id ? null : message.id));
                             }
                           }}
-                          onTouchCancel={handleSwipeCancel}
-                          onTouchEnd={() => handleSwipeEnd(message)}
-                          onTouchMove={handleSwipeMove}
-                          onTouchStart={(event) => handleSwipeStart(event, message.id, mine)}
+                          onTouchCancel={swipeAllowed ? handleSwipeCancel : undefined}
+                          onTouchEnd={swipeAllowed ? () => handleSwipeEnd(message) : undefined}
+                          onTouchMove={swipeAllowed ? handleSwipeMove : undefined}
+                          onTouchStart={swipeAllowed ? (event) => handleSwipeStart(event, message.id, mine) : undefined}
                           role="button"
                           style={swipeActive ? { transform: `translateX(${swipeOffset}px)` } : undefined}
                           tabIndex={0}
@@ -988,6 +1002,12 @@ function ChatWindowInner({
           >
             İptal
           </button>
+        </div>
+      ) : null}
+
+      {!networkOnline ? (
+        <div className="border-t border-amber-900/60 bg-amber-950/40 px-3 py-2 text-xs text-amber-200">
+          İnternet bağlantısı yok. Gönderme düğmesi bağlantı gelene kadar pasif.
         </div>
       ) : null}
 

@@ -2,9 +2,12 @@
   "name": "ChatApp",
   "short_name": "Chat",
   "description": "Realtime chat built with Next.js and Supabase",
-  "start_url": "/",
+  "id": "/chat",
+  "start_url": "/chat",
   "scope": "/",
+  "display_override": ["standalone", "minimal-ui"],
   "display": "standalone",
+  "orientation": "portrait-primary",
   "background_color": "#121212",
   "theme_color": "#3b82f6",
   "icons": [
