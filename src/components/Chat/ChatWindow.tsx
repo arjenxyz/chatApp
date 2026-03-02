@@ -64,6 +64,15 @@ type MessageRow = {
   edited: boolean;
 }
 
+function normalizeParticipant(row: ParticipantRowRaw): ParticipantRow {
+  const profile = row.profile
+    ? Array.isArray(row.profile)
+      ? row.profile[0] ?? null
+      : row.profile
+    : null;
+  return { user_id: row.user_id, profile };
+}
+
 function normalizeReply(reply: MessageRowRaw["replied_to"]): MessageReply | null {
   if (!reply) return null;
   if (Array.isArray(reply)) return reply[0] ?? null;
