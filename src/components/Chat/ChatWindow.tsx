@@ -479,7 +479,8 @@ export function ChatWindow({
       .eq("id", user.id)
       .single();
     
-    const adminStatus = profileData?.is_admin ?? false;
+    const adminStatus = profileData?.is_admin === true; // Strictly check for true, not truthy values
+    console.log("[loadStickers] User ID:", user.id, "Admin status:", adminStatus, "Profile data:", profileData);
     setIsAdmin(adminStatus);
 
     const { data, error } = await supabase
@@ -501,6 +502,7 @@ export function ChatWindow({
 
     // If admin, load all pending stickers with creator info
     if (adminStatus) {
+      console.log("[loadStickers] Loading pending stickers for admin user");
       const { data: allPending } = await supabase
         .from("stickers")
         .select(`
@@ -516,6 +518,7 @@ export function ChatWindow({
         .order("created_at", { ascending: true });
       
       if (allPending) {
+        console.log("[loadStickers] Found pending stickers:", allPending.length);
         setAllPendingStickers(
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           allPending.map((s: any) => ({
@@ -523,7 +526,13 @@ export function ChatWindow({
             creator_username: s.creator && Array.isArray(s.creator) ? s.creator[0]?.username : (s.creator as { username?: string })?.username
           }))
         );
+      } else {
+        console.log("[loadStickers] No pending stickers found");
+        setAllPendingStickers([]);
       }
+    } else {
+      console.log("[loadStickers] Not admin, skipping pending stickers load");
+      setAllPendingStickers([]);
     }
   }, [supabase, user]);
 
@@ -1966,7 +1975,7 @@ export function ChatWindow({
               <div className="mb-3 flex items-center justify-between border-b border-zinc-800 pb-2">
                 <h3 className="text-sm font-semibold text-zinc-100">Stickerlarım</h3>
                 <div className="flex items-center gap-2">
-                  {isAdmin && allPendingStickers.length > 0 ? (
+                  {isAdmin === true && allPendingStickers.length > 0 ? (
                     <button
                       className="inline-flex items-center gap-1 rounded-lg border border-orange-700/50 bg-orange-600/20 px-2 py-1.5 text-xs font-medium text-orange-300 transition-colors hover:bg-orange-600/30"
                       onClick={() => setShowModerationPanel(!showModerationPanel)}
@@ -1988,7 +1997,7 @@ export function ChatWindow({
               </div>
 
               {/* Admin moderation panel */}
-              {isAdmin && showModerationPanel && allPendingStickers.length > 0 ? (
+              {isAdmin === true && showModerationPanel && allPendingStickers.length > 0 ? (
                 <div className="mb-4 rounded-lg border border-orange-900/40 bg-orange-950/20 p-3 max-h-60 overflow-y-auto">
                   <p className="mb-2 text-xs font-semibold text-orange-300">Onay Bekleyen Stickerlar</p>
                   <div className="space-y-2">
