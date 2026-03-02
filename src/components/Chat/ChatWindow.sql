@@ -12,7 +12,10 @@ create table if not exists public.conversations (
   name text
 );
 alter table public.conversations add column if not exists pinned boolean not null default false;
+alter table public.conversations add column if not exists owner_id uuid references public.profiles (id) on delete set null;
+alter table public.conversations alter column owner_id set default auth.uid();
 create index if not exists conversations_pinned_idx on public.conversations (pinned);
+create index if not exists conversations_owner_id_idx on public.conversations (owner_id);
 
 create table if not exists public.participants (
   id uuid primary key default gen_random_uuid(),
@@ -35,6 +38,9 @@ create table if not exists public.messages (
 alter table public.messages add column if not exists replied_to uuid references public.messages (id) on delete set null;
 -- flag used when a user deletes a message; we keep the row and show placeholder in UI
 alter table public.messages add column if not exists deleted boolean not null default false;
+-- flag to mark a message that has been edited
+alter table public.messages add column if not exists edited boolean not null default false;
+create index if not exists messages_edited_idx on public.messages (edited);
 alter table public.messages replica identity full;
 create index if not exists messages_conversation_id_created_at_idx on public.messages (conversation_id, created_at);
 
@@ -97,21 +103,21 @@ create policy "Conversations are viewable by participants"
 on public.conversations
 for select
 to authenticated
-using (public.is_conversation_member(id));
+using (public.is_conversation_member(id) or owner_id = auth.uid());
 
 drop policy if exists "Authenticated users can create conversations" on public.conversations;
 create policy "Authenticated users can create conversations"
 on public.conversations
 for insert
 to authenticated
-with check (auth.uid() is not null);
+with check (auth.uid() is not null and owner_id = auth.uid());
 
 drop policy if exists "Participants can delete conversations" on public.conversations;
 create policy "Participants can delete conversations"
 on public.conversations
 for delete
 to authenticated
-using (public.is_conversation_member(id));
+using (public.is_conversation_member(id) or owner_id = auth.uid());
 
 drop policy if exists "Participants are viewable by conversation members" on public.participants;
 create policy "Participants are viewable by conversation members"

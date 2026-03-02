@@ -48,6 +48,7 @@ type MessageRowRaw = {
   created_at: string;
   is_read: boolean;
   deleted?: boolean;
+  edited?: boolean;
 };
 
 type MessageRow = {
@@ -60,16 +61,7 @@ type MessageRow = {
   created_at: string;
   is_read: boolean;
   deleted: boolean;
-};
-
-function normalizeParticipant(row: ParticipantRowRaw): ParticipantRow {
-  const profile = row.profile
-    ? Array.isArray(row.profile)
-      ? row.profile[0] ?? null
-      : row.profile
-    : null;
-
-  return { user_id: row.user_id, profile };
+  edited: boolean;
 }
 
 function normalizeReply(reply: MessageRowRaw["replied_to"]): MessageReply | null {
@@ -89,7 +81,8 @@ function normalizeMessage(row: MessageRowRaw): MessageRow {
     replied_to: normalizeReply(row.replied_to),
     created_at: row.created_at,
     is_read: row.is_read,
-    deleted: row.deleted ?? false
+    deleted: row.deleted ?? false,
+    edited: row.edited ?? false
   };
 }
 
@@ -242,6 +235,7 @@ export function ChatWindow({
 
   const notifyRecipientsForPush = useCallback(
     async (messageId: string) => {
+      if (process.env.NODE_ENV !== "production") return;
       if (!conversationId) return;
 
       const { data: sessionData } = await supabase.auth.getSession();
@@ -477,7 +471,7 @@ export function ChatWindow({
           .eq("conversation_id", conversationId),
         supabase
           .from("messages")
-          .select("id, conversation_id, sender_id, content, type, replied_to(id, content, sender_id), created_at, is_read, deleted")
+          .select("id, conversation_id, sender_id, content, type, replied_to(id, content, sender_id), created_at, is_read, deleted, edited")
           .eq("conversation_id", conversationId)
           .order("created_at", { ascending: true })
       ]);
@@ -668,7 +662,7 @@ export function ChatWindow({
       if (editingTarget) {
         const { error: updateError } = await supabase
           .from("messages")
-          .update({ content: trimmedText })
+          .update({ content: trimmedText, edited: true })
           .eq("id", editingTarget.id)
           .eq("sender_id", user.id);
 
@@ -910,6 +904,9 @@ export function ChatWindow({
 
                           <p className="whitespace-pre-wrap break-words">
                             {message.deleted ? "Bir mesaj silindi" : message.content}
+                            {message.edited && !message.deleted ? (
+                              <span className="ml-1 text-[10px] text-zinc-400">(düzenlendi)</span>
+                            ) : null}
                           </p>
 
                           <div
