@@ -9,8 +9,9 @@ const nextConfig = {
 // Options passed to the PWA plugin itself.
 const pwaConfig = {
   dest: "public",
-  disable: process.env.NODE_ENV === "development",
-  importScripts: ["/sw-push.js"]
+  disable: process.env.NODE_ENV !== "production",
+  importScripts: ["/sw-push.js"],
+  buildExcludes: [/app-build-manifest\.json$/]
 };
 
 // `withPWA` returns a function that takes the actual Next config so we call it

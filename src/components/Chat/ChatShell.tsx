@@ -12,7 +12,6 @@ import { cn } from "@/lib/utils";
 import { useAuth } from "@/providers/AuthProvider";
 
 const USERNAME_REGEX = /^[a-z0-9_]{3,20}$/;
-const SW_READY_TIMEOUT_MS = 10000;
 
 type BeforeInstallPromptEvent = Event & {
   prompt: () => Promise<void>;
@@ -30,95 +29,6 @@ function base64UrlToArrayBuffer(value: string): ArrayBuffer {
   }
 
   return output.buffer;
-}
-
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timeoutId = window.setTimeout(() => {
-      reject(new Error(message));
-    }, timeoutMs);
-
-    promise
-      .then((value) => {
-        window.clearTimeout(timeoutId);
-        resolve(value);
-      })
-      .catch((error) => {
-        window.clearTimeout(timeoutId);
-        reject(error);
-      });
-  });
-}
-
-function waitForActivation(
-  registration: ServiceWorkerRegistration,
-  timeoutMessage: string
-): Promise<ServiceWorkerRegistration> {
-  if (registration.active) return Promise.resolve(registration);
-
-  const worker = registration.installing ?? registration.waiting;
-  if (!worker) {
-    return Promise.reject(new Error(timeoutMessage));
-  }
-
-  return withTimeout(
-    new Promise<ServiceWorkerRegistration>((resolve, reject) => {
-      const onStateChange = () => {
-        if (worker.state === "activated") {
-          worker.removeEventListener("statechange", onStateChange);
-          resolve(registration);
-          return;
-        }
-        if (worker.state === "redundant") {
-          worker.removeEventListener("statechange", onStateChange);
-          reject(new Error("Service Worker redundant duruma geçti."));
-        }
-      };
-
-      worker.addEventListener("statechange", onStateChange);
-      onStateChange();
-    }),
-    SW_READY_TIMEOUT_MS,
-    timeoutMessage
-  );
-}
-
-async function ensureActiveServiceWorker(
-  registration: ServiceWorkerRegistration,
-  timeoutMessage: string
-): Promise<ServiceWorkerRegistration> {
-  if (registration.active) return registration;
-
-  try {
-    await registration.update();
-  } catch {
-    // no-op
-  }
-
-  if (registration.installing || registration.waiting) {
-    try {
-      return await waitForActivation(registration, timeoutMessage);
-    } catch {
-      // continue with next fallback
-    }
-  }
-
-  if (registration.active) return registration;
-
-  try {
-    const readyRegistration = await withTimeout(navigator.serviceWorker.ready, SW_READY_TIMEOUT_MS, timeoutMessage);
-    if (readyRegistration.active) return readyRegistration;
-  } catch {
-    // fall through to final checks
-  }
-
-  const refreshed = await navigator.serviceWorker.getRegistration();
-  if (refreshed?.active) return refreshed;
-  if (refreshed && (refreshed.installing || refreshed.waiting)) {
-    return await waitForActivation(refreshed, timeoutMessage);
-  }
-
-  throw new Error(timeoutMessage);
 }
 
 export function ChatShell() {
@@ -209,6 +119,12 @@ export function ChatShell() {
   useEffect(() => {
     if (typeof window === "undefined") return;
 
+    if (!isMobile) {
+      setPushSupported(false);
+      setPushEnabled(false);
+      return;
+    }
+
     const isTopLevel = window.self === window.top;
     const supported =
       isTopLevel &&
@@ -222,7 +138,7 @@ export function ChatShell() {
     } else if (!isTopLevel) {
       setPushError("Bildirim izni iframe içinde çalışmaz. Uygulamayı doğrudan aç.");
     }
-  }, []);
+  }, [isMobile]);
 
   useEffect(() => {
     if (!isMobile) return;
@@ -325,6 +241,59 @@ export function ChatShell() {
     [supabase, user]
   );
 
+  const waitForActiveServiceWorker = useCallback(
+    async (registration: ServiceWorkerRegistration): Promise<ServiceWorkerRegistration> => {
+      if (registration.active) return registration;
+
+      const worker = registration.installing ?? registration.waiting;
+      if (worker) {
+        await new Promise<void>((resolve, reject) => {
+          const onStateChange = () => {
+            if (worker.state === "activated") {
+              worker.removeEventListener("statechange", onStateChange);
+              resolve();
+              return;
+            }
+
+            if (worker.state === "redundant") {
+              worker.removeEventListener("statechange", onStateChange);
+              reject(new Error("Service Worker kurulumunda hata oluştu."));
+            }
+          };
+
+          worker.addEventListener("statechange", onStateChange);
+          onStateChange();
+        });
+      }
+
+      if (registration.active) return registration;
+
+      const readyRegistration = await navigator.serviceWorker.ready;
+      if (readyRegistration.active) return readyRegistration;
+
+      throw new Error("Service Worker aktif değil. Sayfayı yenileyip tekrar dene.");
+    },
+    []
+  );
+
+  const resetServiceWorkersForPush = useCallback(async () => {
+    const registrations = await navigator.serviceWorker.getRegistrations();
+    await Promise.all(registrations.map((registration) => registration.unregister()));
+
+    if (!("caches" in window)) return;
+    const cacheKeys = await caches.keys();
+    await Promise.all(
+      cacheKeys
+        .filter((key) => key.startsWith("workbox-"))
+        .map((key) => caches.delete(key))
+    );
+  }, []);
+
+  const registerPushServiceWorker = useCallback(async (): Promise<ServiceWorkerRegistration> => {
+    const registration = await navigator.serviceWorker.register("/sw.js", { scope: "/" });
+    return waitForActiveServiceWorker(registration);
+  }, [waitForActiveServiceWorker]);
+
   const getPushRegistration = useCallback(async (): Promise<ServiceWorkerRegistration> => {
     if (!("serviceWorker" in navigator)) {
       throw new Error("Service Worker desteklenmiyor.");
@@ -333,39 +302,55 @@ export function ChatShell() {
       throw new Error("Push sadece HTTPS güvenli bağlamda çalışır.");
     }
 
-    const existing = (await navigator.serviceWorker.getRegistration()) ?? (await navigator.serviceWorker.getRegistration("/"));
-    if (existing) {
-      return await ensureActiveServiceWorker(
-        existing,
-        "Service Worker hazır hale gelmedi. Sayfayı yenileyip tekrar dene."
-      );
+    const resolveRegistration = async (): Promise<ServiceWorkerRegistration> => {
+      const existing =
+        (await navigator.serviceWorker.getRegistration("/")) ??
+        (await navigator.serviceWorker.getRegistration());
+
+      if (!existing) {
+        return registerPushServiceWorker();
+      }
+
+      try {
+        await existing.update();
+      } catch {
+        // no-op
+      }
+
+      return waitForActiveServiceWorker(existing);
+    };
+
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        return await resolveRegistration();
+      } catch (error) {
+        lastError = error;
+
+        if (attempt === 0) {
+          try {
+            await resetServiceWorkersForPush();
+          } catch (resetError) {
+            console.warn("[push] service worker reset failed:", resetError);
+          }
+        }
+      }
     }
 
-    try {
-      const registered = await navigator.serviceWorker.register("/sw.js", { scope: "/" });
-      return await ensureActiveServiceWorker(
-        registered,
-        "Service Worker zaman aşımına uğradı. Sayfayı yenileyip tekrar dene."
-      );
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "";
-      const normalizedMessage = message.toLowerCase();
-      if (message.toLowerCase().includes("scope")) {
-        throw new Error("Service Worker scope hatası. Farklı domain/alt yol kontrol et.");
-      }
-      if (
-        normalizedMessage.includes("zaman aşımına uğradı") ||
-        normalizedMessage.includes("hazır hale gelmedi") ||
-        normalizedMessage.includes("redundant")
-      ) {
-        throw new Error(message);
-      }
-      throw new Error("Push altyapısı hazır değil. Production/PWA üzerinde tekrar dene.");
+    console.error("[push] service worker register failed:", lastError);
+    const message = lastError instanceof Error ? lastError.message : "";
+    if (message.toLowerCase().includes("scope")) {
+      throw new Error("Service Worker scope hatası. Farklı domain/alt yol kontrol et.");
     }
-  }, []);
+    throw new Error(
+      message
+        ? `Push altyapısı hazır değil: ${message}`
+        : "Push altyapısı hazır değil. Production/PWA üzerinde tekrar dene."
+    );
+  }, [registerPushServiceWorker, resetServiceWorkersForPush, waitForActiveServiceWorker]);
 
   const syncPushSubscription = useCallback(async () => {
-    if (!pushSupported || pushPermission !== "granted" || !user) {
+    if (!isMobile || !pushSupported || pushPermission !== "granted" || !user) {
       setPushEnabled(false);
       return;
     }
@@ -386,10 +371,10 @@ export function ChatShell() {
       setPushEnabled(false);
       setPushError(error instanceof Error ? error.message : "Push senkronizasyonu başarısız.");
     }
-  }, [getPushRegistration, pushPermission, pushSupported, savePushSubscription, user]);
+  }, [getPushRegistration, isMobile, pushPermission, pushSupported, savePushSubscription, user]);
 
   const enablePushNotifications = useCallback(async () => {
-    if (!pushSupported || !user) return;
+    if (!isMobile || !pushSupported || !user) return;
 
     setPushError(null);
     setPushBusy(true);
@@ -400,6 +385,14 @@ export function ChatShell() {
 
       if (permission !== "granted") {
         setPushEnabled(false);
+        return;
+      }
+
+      const userAgent = navigator.userAgent.toLowerCase();
+      const isAppleMobile = /iphone|ipad|ipod/.test(userAgent);
+      if (isAppleMobile && !isPWA) {
+        setPushEnabled(false);
+        setPushError("iPhone/iPad için uygulamayı Ana Ekran'a ekleyip oradan aç.");
         return;
       }
 
@@ -427,14 +420,15 @@ export function ChatShell() {
     } finally {
       setPushBusy(false);
     }
-  }, [getPushRegistration, pushSupported, savePushSubscription, user, vapidPublicKey]);
+  }, [getPushRegistration, isMobile, isPWA, pushSupported, savePushSubscription, user, vapidPublicKey]);
 
   useEffect(() => {
     void syncPushSubscription();
   }, [syncPushSubscription]);
 
   const showUsernameSetup = Boolean(user && profile && !profile.username);
-  const showPushPrompt = pushSupported && user && (pushPermission !== "granted" || !pushEnabled || Boolean(pushError));
+  const showPushPrompt =
+    isMobile && pushSupported && user && (pushPermission !== "granted" || !pushEnabled || Boolean(pushError));
 
   const promptInstall = useCallback(async () => {
     if (!installPromptEvent) return;
@@ -526,43 +520,6 @@ export function ChatShell() {
         </section>
       ) : null}
 
-      {showPushPrompt ? (
-        <section
-          className={cn(
-            "rounded-2xl border border-blue-900/60 bg-blue-950/30 p-3",
-            isPWA ? "m-3 mb-0" : "mt-3"
-          )}
-        >
-          <div className="flex items-start justify-between gap-3">
-            <div className="min-w-0">
-              <p className="flex items-center gap-2 text-sm font-medium text-blue-200">
-                <BellRing className="h-4 w-4 shrink-0" />
-                Mobil bildirimleri aç
-              </p>
-              <p className="mt-1 text-xs text-blue-100/80">
-                Uygulama kapalıyken yeni mesajlardan anında haberdar olursun.
-              </p>
-              {pushPermission === "denied" ? (
-                <p className="mt-1 text-xs text-amber-200">Bildirim izni engelli. Cihaz ayarından tekrar izin ver.</p>
-              ) : null}
-              {pushError ? <p className="mt-1 text-xs text-red-200">{pushError}</p> : null}
-            </div>
-
-            <button
-              className={cn(
-                "shrink-0 rounded-xl border border-blue-700 bg-blue-600 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-500",
-                pushBusy && "opacity-60"
-              )}
-              disabled={pushBusy || !isNetworkOnline}
-              onClick={() => void enablePushNotifications()}
-              type="button"
-            >
-              {pushBusy ? "Açılıyor..." : "Aktifleştir"}
-            </button>
-          </div>
-        </section>
-      ) : null}
-
       {showUsernameSetup ? (
         <section className={cn("rounded-2xl border border-zinc-800 bg-zinc-900/50 p-4", isPWA ? "m-3 mb-0" : "mt-3")}>
           <p className="text-sm font-semibold text-zinc-100">Kullanıcı adını belirle</p>
@@ -597,11 +554,47 @@ export function ChatShell() {
 
       <section
         className={cn(
-          "grid min-h-0 flex-1 grid-cols-1",
+          "relative grid min-h-0 flex-1 grid-cols-1",
           isPWA ? "gap-0" : "mt-3 gap-3 md:grid-cols-[320px,1fr]",
           isPWA && !isMobile && "md:grid-cols-[320px,1fr]"
         )}
       >
+        {showPushPrompt ? (
+          <section className="pointer-events-none absolute inset-x-0 top-2 z-30 px-3">
+            <div className="pointer-events-auto mx-auto w-full max-w-md rounded-2xl border border-blue-800/70 bg-zinc-950/95 p-3 shadow-2xl backdrop-blur">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="flex items-center gap-2 text-sm font-medium text-blue-200">
+                    <BellRing className="h-4 w-4 shrink-0" />
+                    Mobil bildirimleri aç
+                  </p>
+                  <p className="mt-1 text-xs text-blue-100/80">
+                    Uygulama kapalıyken yeni mesajlardan anında haberdar olursun.
+                  </p>
+                  {pushPermission === "denied" ? (
+                    <p className="mt-1 text-xs text-amber-200">
+                      Bildirim izni engelli. Cihaz ayarından tekrar izin ver.
+                    </p>
+                  ) : null}
+                  {pushError ? <p className="mt-1 text-xs text-red-200">{pushError}</p> : null}
+                </div>
+
+                <button
+                  className={cn(
+                    "shrink-0 rounded-xl border border-blue-700 bg-blue-600 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-500",
+                    pushBusy && "opacity-60"
+                  )}
+                  disabled={pushBusy || !isNetworkOnline}
+                  onClick={() => void enablePushNotifications()}
+                  type="button"
+                >
+                  {pushBusy ? "Açılıyor..." : "Aktifleştir"}
+                </button>
+              </div>
+            </div>
+          </section>
+        ) : null}
+
         <aside
           className={cn(
             "min-h-0",

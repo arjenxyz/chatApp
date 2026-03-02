@@ -35,6 +35,9 @@ export const viewport: Viewport = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="tr" suppressHydrationWarning>
+      <head>
+        <meta content="yes" name="mobile-web-app-capable" />
+      </head>
       <body className="min-h-screen">
         <Providers>{children}</Providers>
       </body>
