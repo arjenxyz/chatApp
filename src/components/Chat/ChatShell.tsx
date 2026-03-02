@@ -50,6 +50,39 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
   });
 }
 
+function waitForActivation(
+  registration: ServiceWorkerRegistration,
+  timeoutMessage: string
+): Promise<ServiceWorkerRegistration> {
+  if (registration.active) return Promise.resolve(registration);
+
+  const worker = registration.installing ?? registration.waiting;
+  if (!worker) {
+    return Promise.reject(new Error(timeoutMessage));
+  }
+
+  return withTimeout(
+    new Promise<ServiceWorkerRegistration>((resolve, reject) => {
+      const onStateChange = () => {
+        if (worker.state === "activated") {
+          worker.removeEventListener("statechange", onStateChange);
+          resolve(registration);
+          return;
+        }
+        if (worker.state === "redundant") {
+          worker.removeEventListener("statechange", onStateChange);
+          reject(new Error("Service Worker redundant duruma geçti."));
+        }
+      };
+
+      worker.addEventListener("statechange", onStateChange);
+      onStateChange();
+    }),
+    SW_READY_TIMEOUT_MS,
+    timeoutMessage
+  );
+}
+
 async function ensureActiveServiceWorker(
   registration: ServiceWorkerRegistration,
   timeoutMessage: string
@@ -60,6 +93,14 @@ async function ensureActiveServiceWorker(
     await registration.update();
   } catch {
     // no-op
+  }
+
+  if (registration.installing || registration.waiting) {
+    try {
+      return await waitForActivation(registration, timeoutMessage);
+    } catch {
+      // continue with next fallback
+    }
   }
 
   if (registration.active) return registration;
@@ -73,6 +114,9 @@ async function ensureActiveServiceWorker(
 
   const refreshed = await navigator.serviceWorker.getRegistration();
   if (refreshed?.active) return refreshed;
+  if (refreshed && (refreshed.installing || refreshed.waiting)) {
+    return await waitForActivation(refreshed, timeoutMessage);
+  }
 
   throw new Error(timeoutMessage);
 }
@@ -285,6 +329,9 @@ export function ChatShell() {
     if (!("serviceWorker" in navigator)) {
       throw new Error("Service Worker desteklenmiyor.");
     }
+    if (!window.isSecureContext) {
+      throw new Error("Push sadece HTTPS güvenli bağlamda çalışır.");
+    }
 
     const existing = (await navigator.serviceWorker.getRegistration()) ?? (await navigator.serviceWorker.getRegistration("/"));
     if (existing) {
@@ -302,8 +349,16 @@ export function ChatShell() {
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : "";
+      const normalizedMessage = message.toLowerCase();
       if (message.toLowerCase().includes("scope")) {
         throw new Error("Service Worker scope hatası. Farklı domain/alt yol kontrol et.");
+      }
+      if (
+        normalizedMessage.includes("zaman aşımına uğradı") ||
+        normalizedMessage.includes("hazır hale gelmedi") ||
+        normalizedMessage.includes("redundant")
+      ) {
+        throw new Error(message);
       }
       throw new Error("Push altyapısı hazır değil. Production/PWA üzerinde tekrar dene.");
     }
