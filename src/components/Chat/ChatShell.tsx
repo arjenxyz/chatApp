@@ -21,6 +21,23 @@ export function ChatShell() {
   const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
   const [showConversationListOnMobile, setShowConversationListOnMobile] = useState(true);
 
+  // detect standalone / PWA mode so we can strip chrome and maximize
+  const [isPWA, setIsPWA] = useState(false);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const checkStandalone = () => {
+      // navigator.standalone is iOS-specific
+      const nav = window.navigator as Navigator & { standalone?: boolean };
+      const standalone = window.matchMedia('(display-mode: standalone)').matches || nav.standalone;
+      setIsPWA(standalone ?? false);
+    };
+    checkStandalone();
+    window.matchMedia('(display-mode: standalone)').addEventListener("change", checkStandalone);
+    return () => {
+      window.matchMedia('(display-mode: standalone)').removeEventListener("change", checkStandalone);
+    };
+  }, []);
+
   const [username, setUsername] = useState(profile?.username ?? "");
   const [savingUsername, setSavingUsername] = useState(false);
   const [usernameError, setUsernameError] = useState<string | null>(null);
@@ -108,10 +125,15 @@ export function ChatShell() {
 
   return (
     <main
-      className={cn("mx-auto flex w-full max-w-6xl flex-col overflow-hidden px-3 py-3 md:px-6 md:py-5", isMobile ? "h-[100dvh]" : "h-screen")}
+      className={cn(
+        "mx-auto flex w-full flex-col overflow-hidden",
+        isPWA ? "max-w-none px-0 py-0" : "max-w-6xl px-3 py-3 md:px-6 md:py-5",
+        isMobile ? "h-[100dvh]" : "h-screen"
+      )}
       style={isMobile && mobileViewportHeight ? { height: `${mobileViewportHeight}px` } : undefined}
     >
-      <header className="flex items-center justify-between gap-3 rounded-2xl border border-zinc-800 bg-zinc-900/60 px-4 py-3 shadow-sm backdrop-blur">
+      {!isPWA && (
+        <header className="flex items-center justify-between gap-3 rounded-2xl border border-zinc-800 bg-zinc-900/60 px-4 py-3 shadow-sm backdrop-blur">
         <div className="min-w-0">
           <p className="truncate text-sm font-semibold tracking-wide text-zinc-100">Chat Workspace</p>
           <p className="truncate text-xs text-zinc-500">
@@ -129,9 +151,10 @@ export function ChatShell() {
           Çıkış
         </button>
       </header>
+      )}
 
       {showUsernameSetup ? (
-        <section className="mt-3 rounded-2xl border border-zinc-800 bg-zinc-900/50 p-4">
+        <section className={cn("rounded-2xl border border-zinc-800 bg-zinc-900/50 p-4", isPWA ? "m-3" : "mt-3")}>
           <p className="text-sm font-semibold text-zinc-100">Kullanıcı adını belirle</p>
           <p className="mt-1 text-xs text-zinc-500">Direkt mesaj başlatmak için kullanıcı adı gerekli.</p>
           <div className="mt-3 flex flex-col gap-2 sm:flex-row">
@@ -162,10 +185,17 @@ export function ChatShell() {
         </section>
       ) : null}
 
-      <section className="mt-3 grid min-h-0 flex-1 grid-cols-1 gap-3 md:grid-cols-[320px,1fr]">
+      <section
+        className={cn(
+          "grid min-h-0 flex-1 grid-cols-1",
+          isPWA ? "gap-0" : "mt-3 gap-3 md:grid-cols-[320px,1fr]",
+          isPWA && !isMobile && "md:grid-cols-[320px,1fr]"
+        )}
+      >
         <aside
           className={cn(
-            "min-h-0 rounded-2xl border border-zinc-800 bg-zinc-900/45",
+            "min-h-0",
+            isPWA ? "rounded-none border-0 bg-zinc-950" : "rounded-2xl border border-zinc-800 bg-zinc-900/45",
             isMobile && !showConversationListOnMobile && selectedConversationId ? "hidden" : "block"
           )}
         >
@@ -180,7 +210,8 @@ export function ChatShell() {
 
         <section
           className={cn(
-            "min-h-0 rounded-2xl border border-zinc-800 bg-zinc-900/45",
+            "min-h-0",
+            isPWA ? "rounded-none border-0 bg-zinc-950" : "rounded-2xl border border-zinc-800 bg-zinc-900/45",
             isMobile && showConversationListOnMobile ? "hidden" : "block"
           )}
         >
