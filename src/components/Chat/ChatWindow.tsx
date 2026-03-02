@@ -2019,7 +2019,7 @@ export function ChatWindow({
             event.preventDefault();
             void send();
           }}
-          placeholder="Mesaj yaz... (Enter gönderir, Shift+Enter satır)"
+          placeholder="Mesaj yaz..."
           rows={1}
           value={text}
         />
