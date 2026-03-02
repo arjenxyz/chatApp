@@ -46,6 +46,7 @@ type ConversationItem = {
   avatarUrl: string | null;
   lastMessage: string | null;
   createdAt: string;
+  isBlocked?: boolean;
 };
 
 const USERNAME_REGEX = /^[a-z0-9_]{3,20}$/;
@@ -113,7 +114,8 @@ export function ConversationList({
     const [
       { data: conversations, error: conversationsError },
       { data: participants, error: participantsError },
-      { data: lastMessages, error: lastMessagesError }
+      { data: lastMessages, error: lastMessagesError },
+      { data: blockedUsers, error: blockedUsersError }
     ] = await Promise.all([
       supabase
         .from("conversations")
@@ -128,14 +130,28 @@ export function ConversationList({
         .from("messages")
         .select("conversation_id, content, sender_id, created_at, deleted")
         .in("conversation_id", conversationIds)
-        .order("created_at", { ascending: false })
+        .order("created_at", { ascending: false }),
+      supabase
+        .from("user_blocks")
+        .select("blocked_id, blocker_id")
+        .or(`blocker_id.eq.${user.id},blocked_id.eq.${user.id}`)
     ]);
 
-    if (conversationsError || participantsError || lastMessagesError) {
-      setError(conversationsError?.message ?? participantsError?.message ?? lastMessagesError?.message ?? "Bilinmeyen hata");
+    if (conversationsError || participantsError || lastMessagesError || blockedUsersError) {
+      setError(conversationsError?.message ?? participantsError?.message ?? lastMessagesError?.message ?? blockedUsersError?.message ?? "Bilinmeyen hata");
       setLoading(false);
       return;
     }
+
+    // Build set of blocked user IDs
+    const blockedUserIds = new Set<string>();
+    ((blockedUsers as { blocked_id: string; blocker_id: string }[] | null) ?? []).forEach((block) => {
+      if (block.blocker_id === user.id) {
+        blockedUserIds.add(block.blocked_id);
+      } else if (block.blocked_id === user.id) {
+        blockedUserIds.add(block.blocker_id);
+      }
+    });
 
     const participantsByConversation = new Map<string, ParticipantRow[]>();
     ((participants as ParticipantRow[] | null) ?? []).forEach((participant) => {
@@ -151,31 +167,34 @@ export function ConversationList({
       }
     });
 
-    const nextItems: ConversationItem[] = ((conversations as ConversationRow[] | null) ?? []).map((conversation) => {
-      const members = participantsByConversation.get(conversation.id) ?? [];
-      const other = members.find((member) => member.user_id !== user.id);
-      const otherProfile = other?.profile
-        ? Array.isArray(other.profile)
-          ? other.profile[0] ?? null
-          : other.profile
-        : null;
+    const nextItems: ConversationItem[] = ((conversations as ConversationRow[] | null) ?? [])
+      .map((conversation) => {
+        const members = participantsByConversation.get(conversation.id) ?? [];
+        const other = members.find((member) => member.user_id !== user.id);
+        const otherProfile = other?.profile
+          ? Array.isArray(other.profile)
+            ? other.profile[0] ?? null
+            : other.profile
+          : null;
 
-      const lastMessage = lastMessageByConversation.get(conversation.id) ?? null;
-      const baseTitle = otherProfile?.username || otherProfile?.full_name || "Kullanıcı";
-      const title = conversation.is_group ? conversation.name || "Grup Sohbeti" : baseTitle;
-      const previewText = lastMessage ? buildPreviewText(lastMessage, user.id) : null;
+        const isBlocked = other?.user_id ? blockedUserIds.has(other.user_id) : false;
+        const lastMessage = lastMessageByConversation.get(conversation.id) ?? null;
+        const baseTitle = otherProfile?.username || otherProfile?.full_name || "Kullanıcı";
+        const title = conversation.is_group ? conversation.name || "Grup Sohbeti" : baseTitle;
+        const previewText = lastMessage ? buildPreviewText(lastMessage, user.id) : null;
 
-      return {
-        id: conversation.id,
-        title,
-        subtitle: conversation.is_group ? "Grup" : otherProfile?.full_name || "Direkt mesaj",
-        isGroup: conversation.is_group,
-        otherUserId: conversation.is_group ? null : other?.user_id ?? null,
-        avatarUrl: conversation.is_group ? null : otherProfile?.avatar_url ?? null,
-        lastMessage: previewText,
-        createdAt: lastMessage?.created_at ?? conversation.created_at
-      };
-    });
+        return {
+          id: conversation.id,
+          title,
+          subtitle: conversation.is_group ? "Grup" : isBlocked ? "Engellendi" : otherProfile?.full_name || "Direkt mesaj",
+          isGroup: conversation.is_group,
+          otherUserId: conversation.is_group ? null : other?.user_id ?? null,
+          avatarUrl: conversation.is_group || isBlocked ? null : otherProfile?.avatar_url ?? null,
+          lastMessage: previewText,
+          createdAt: lastMessage?.created_at ?? conversation.created_at,
+          isBlocked: !conversation.is_group && isBlocked
+        };
+      });
 
     nextItems.sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
 
@@ -258,6 +277,17 @@ export function ConversationList({
         {
           event: "INSERT",
           schema: "public",
+          table: "conversations"
+        },
+        () => {
+          void refresh();
+        }
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
           table: "messages"
         },
         (payload) => {
@@ -273,6 +303,30 @@ export function ConversationList({
         },
         (payload) => {
           patchLastMessageFromRealtime(payload.new as LastMessageRow);
+        }
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "user_blocks",
+          filter: `or(blocker_id.eq.${user.id},blocked_id.eq.${user.id})`
+        },
+        () => {
+          void refresh();
+        }
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "DELETE",
+          schema: "public",
+          table: "user_blocks",
+          filter: `or(blocker_id.eq.${user.id},blocked_id.eq.${user.id})`
+        },
+        () => {
+          void refresh();
         }
       )
       .subscribe();
@@ -409,18 +463,15 @@ export function ConversationList({
         }
       }
 
-      const { data: conversation, error: conversationError } = await supabase
+      const conversationId = crypto.randomUUID();
+      const { error: conversationError } = await supabase
         .from("conversations")
-        .insert({ is_group: false })
-        .select("id")
-        .single();
+        .insert({ id: conversationId, owner_id: user.id, is_group: false });
 
-      if (conversationError || !conversation) {
+      if (conversationError) {
         setCreateError(conversationError?.message ?? "Sohbet oluşturulamadı.");
         return;
       }
-
-      const conversationId = conversation.id as string;
 
       const { error: joinError } = await supabase
         .from("participants")
@@ -554,7 +605,7 @@ export function ConversationList({
                           {item.title.slice(0, 1).toUpperCase()}
                         </div>
                       )}
-                      {item.otherUserId ? (
+                      {item.otherUserId && !item.isBlocked ? (
                         <span
                           aria-label={online ? "online" : "offline"}
                           className={cn(

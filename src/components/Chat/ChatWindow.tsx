@@ -1,6 +1,24 @@
 "use client";
 
-import { ArrowLeft, Copy, Pencil, Reply, SendHorizontal, Trash2 } from "lucide-react";
+import {
+  AlertCircle,
+  ArrowLeft,
+  Bell,
+  BellOff,
+  Check,
+  Copy,
+  ImagePlus,
+  Pencil,
+  Plus,
+  Reply,
+  SendHorizontal,
+  Shield,
+  Sticker,
+  Trash2,
+  Upload,
+  X
+} from "lucide-react";
+import LinkifyIt from "linkify-it";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { usePresence } from "@/components/Presence/PresenceProvider";
@@ -38,12 +56,24 @@ type MessageReply = {
   sender_id: string;
 };
 
+type MessageStickerRowRaw = {
+  id: string;
+  name: string;
+  image_url: string;
+  created_by: string;
+};
+
+type MessageSticker = MessageStickerRowRaw | null;
+
 type MessageRowRaw = {
   id: string;
   conversation_id: string;
   sender_id: string;
   content: string;
-  type: "text" | "image";
+  type: "text" | "image" | "sticker";
+  media_url?: string | null;
+  sticker_id?: string | null;
+  sticker?: MessageStickerRowRaw | MessageStickerRowRaw[] | null;
   replied_to: MessageReply | MessageReply[] | string | null;
   created_at: string;
   is_read: boolean;
@@ -56,12 +86,14 @@ type MessageRow = {
   conversation_id: string;
   sender_id: string;
   content: string;
-  type: "text" | "image";
+  type: "text" | "image" | "sticker";
   replied_to: MessageReply | null;
   created_at: string;
   is_read: boolean;
   deleted: boolean;
   edited: boolean;
+  mediaUrl: string | null;
+  sticker: MessageSticker;
 }
 
 function normalizeParticipant(row: ParticipantRowRaw): ParticipantRow {
@@ -80,6 +112,12 @@ function normalizeReply(reply: MessageRowRaw["replied_to"]): MessageReply | null
   return reply;
 }
 
+function normalizeSticker(row: MessageStickerRowRaw | MessageStickerRowRaw[] | null): MessageSticker {
+  if (!row) return null;
+  if (Array.isArray(row)) return row[0] ?? null;
+  return row;
+}
+
 function normalizeMessage(row: MessageRowRaw): MessageRow {
   return {
     id: row.id,
@@ -91,8 +129,139 @@ function normalizeMessage(row: MessageRowRaw): MessageRow {
     created_at: row.created_at,
     is_read: row.is_read,
     deleted: row.deleted ?? false,
-    edited: row.edited ?? false
+    edited: row.edited ?? false,
+    mediaUrl: row.media_url ?? null,
+    sticker: normalizeSticker(row.sticker ?? null)
   };
+}
+
+const CHAT_MEDIA_BUCKET = "chat-media";
+const ALLOWED_MEDIA_MIME_TYPES = [
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/gif",
+  "image/svg+xml"
+];
+const MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024;
+
+const linkify = new LinkifyIt();
+const PHONE_REGEX = /\+?\d[\d\s\-]{6,}\d/g;
+
+type LinkSegment = {
+  text: string;
+  href?: string;
+};
+
+type EmojiCategory = {
+  id: string;
+  label: string;
+  icon: string;
+  items: string[];
+};
+
+const EMOJI_CATEGORIES: EmojiCategory[] = [
+  {
+    id: "people",
+    label: "İfadeler",
+    icon: "😀",
+    items: ["😀", "😃", "😄", "😁", "😆", "😅", "😂", "🤣", "😊", "😇", "🙂", "🙃", "😉", "😌", "😍", "🤩"]
+  },
+  {
+    id: "gestures",
+    label: "El hareketleri",
+    icon: "🤝",
+    items: ["👍", "👎", "👏", "🙌", "🤟", "🤘", "👌", "✌️", "🤞", "🤙", "👋", "🤚", "🫶"]
+  },
+  {
+    id: "nature",
+    label: "Doğa",
+    icon: "🌸",
+    items: ["🌸", "🌼", "🌻", "🌞", "🌚", "🌈", "☀️", "⛅", "🌊", "🌧️", "🌿", "🍃", "🍀", "🌳", "🌲", "🌴"]
+  },
+  {
+    id: "objects",
+    label: "Nesneler",
+    icon: "🎉",
+    items: ["🎉", "🎁", "🎈", "🎮", "🎧", "📸", "💡", "📌", "🧠", "🕹️", "🎨", "🧵", "💬", "🔔"]
+  }
+];
+
+function splitSegmentsByPhone(segments: LinkSegment[]): LinkSegment[] {
+  const results: LinkSegment[] = [];
+  segments.forEach((segment) => {
+    if (segment.href) {
+      results.push(segment);
+      return;
+    }
+
+    let cursor = 0;
+    PHONE_REGEX.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = PHONE_REGEX.exec(segment.text)) !== null) {
+      if (match.index > cursor) {
+        results.push({ text: segment.text.slice(cursor, match.index) });
+      }
+      const phoneText = match[0];
+      const normalized = phoneText.replace(/[^+\d]/g, "");
+      results.push({ text: phoneText, href: normalized ? `tel:${normalized}` : undefined });
+      cursor = match.index + phoneText.length;
+    }
+
+    if (cursor < segment.text.length) {
+      results.push({ text: segment.text.slice(cursor) });
+    }
+  });
+  return results;
+}
+
+function buildLinkSegments(text: string): LinkSegment[] {
+  if (!text) return [];
+  const matches = linkify.match(text) ?? [];
+  if (matches.length === 0) {
+    return splitSegmentsByPhone([{ text }]);
+  }
+
+  const segments: LinkSegment[] = [];
+  let cursor = 0;
+  matches.forEach((match) => {
+    const start = match.index ?? 0;
+    const end = match.lastIndex ?? start + match.raw.length;
+    if (start > cursor) {
+      segments.push({ text: text.slice(cursor, start) });
+    }
+    segments.push({ text: match.raw, href: match.url });
+    cursor = end;
+  });
+  if (cursor < text.length) {
+    segments.push({ text: text.slice(cursor) });
+  }
+
+  return splitSegmentsByPhone(segments);
+}
+
+function renderLinkifiedText(text: string) {
+  const segments = buildLinkSegments(text);
+  if (segments.length === 0) return <>{text}</>;
+
+  return segments.map((segment, index) => {
+    const key = `${segment.text}-${index}`;
+    if (!segment.href) {
+      return <React.Fragment key={key}>{segment.text}</React.Fragment>;
+    }
+    const inputType = segment.href.startsWith("tel:") || segment.href.startsWith("mailto:");
+    return (
+      <a
+        key={key}
+        href={segment.href}
+        target={inputType ? undefined : "_blank"}
+        rel={inputType ? undefined : "noreferrer"}
+        className="text-emerald-300 underline underline-offset-2 transition-colors hover:text-emerald-200"
+      >
+        {segment.text}
+      </a>
+    );
+  });
 }
 
 function formatDateLabel(dateIso: string): string {
@@ -131,6 +300,29 @@ export function ChatWindow({
   const [typingUserIds, setTypingUserIds] = useState<string[]>([]);
   const [typingDots, setTypingDots] = useState("");
   const [swipeState, setSwipeState] = useState<{ id: string; offset: number } | null>(null);
+  const [muted, setMuted] = useState(false);
+  const [blockStatus, setBlockStatus] = useState<"none" | "blockedByMe" | "blockedByOther">("none");
+  const [stickers, setStickers] = useState<MessageStickerRowRaw[]>([]);
+  const [mediaPickerOpen, setMediaPickerOpen] = useState(false);
+  const [selectedMediaTab, setSelectedMediaTab] = useState<"emoji" | "sticker" | "gif">("emoji");
+  const [selectedEmojiCategory, setSelectedEmojiCategory] = useState(EMOJI_CATEGORIES[0]?.id ?? "people");
+  const [attachmentFile, setAttachmentFile] = useState<File | null>(null);
+  const [attachmentPreview, setAttachmentPreview] = useState<string | null>(null);
+  const [stickerUploadName, setStickerUploadName] = useState("");
+  const [stickerUploadFile, setStickerUploadFile] = useState<File | null>(null);
+  const [stickerUploadPreview, setStickerUploadPreview] = useState<string | null>(null);
+  const [stickerUploadError, setStickerUploadError] = useState<string | null>(null);
+  const [stickerUploading, setStickerUploading] = useState(false);
+  const [stickerDeleting, setStickerDeleting] = useState<string | null>(null);
+  const [pendingStickers, setPendingStickers] = useState<MessageStickerRowRaw[]>([]);
+  const [rejectedStickers, setRejectedStickers] = useState<Array<MessageStickerRowRaw & { rejection_reason?: string }>>(
+    []
+  );
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [allPendingStickers, setAllPendingStickers] = useState<Array<MessageStickerRowRaw & { creator_username?: string }>>(
+    []
+  );
+  const [showModerationPanel, setShowModerationPanel] = useState(false);
 
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -149,9 +341,15 @@ export function ChatWindow({
     locked: boolean;
     isHorizontal: boolean;
   } | null>(null);
+  const attachmentInputRef = useRef<HTMLInputElement | null>(null);
+  const stickerUploadInputRef = useRef<HTMLInputElement | null>(null);
 
   const trimmedText = text.trim();
-  const canSend = Boolean(user && conversationId && trimmedText && networkOnline) && !sending;
+  const blockedByOther = blockStatus === "blockedByOther";
+  const hasTextForMessage = trimmedText.length > 0;
+  const canSend =
+    Boolean(user && conversationId && networkOnline && !sending && !sendingRef.current && !blockedByOther) &&
+    (editingTarget ? hasTextForMessage : hasTextForMessage || Boolean(attachmentFile));
 
   const participantsById = useMemo(() => {
     const map = new Map<string, ParticipantRow>();
@@ -271,6 +469,187 @@ export function ChatWindow({
     [conversationId, supabase.auth]
   );
 
+  const loadStickers = useCallback(async () => {
+    if (!user) return;
+
+    // Check if user is admin
+    const { data: profileData } = await supabase
+      .from("profiles")
+      .select("is_admin")
+      .eq("id", user.id)
+      .single();
+    
+    const adminStatus = profileData?.is_admin ?? false;
+    setIsAdmin(adminStatus);
+
+    const { data, error } = await supabase
+      .from("stickers")
+      .select("id, name, image_url, created_by, approved, rejection_reason")
+      .order("created_at", { ascending: false })
+      .limit(80);
+    if (error) {
+      console.warn("[stickers] load failed:", error.message);
+      return;
+    }
+    
+    const approved = (data ?? []).filter((s: MessageStickerRowRaw & { approved?: boolean; rejection_reason?: string | null }) => s.approved);
+    const pending = (data ?? []).filter((s: MessageStickerRowRaw & { approved?: boolean; rejection_reason?: string | null }) => !s.approved && !s.rejection_reason && s.created_by === user.id);
+    const rejected = (data ?? []).filter((s: MessageStickerRowRaw & { approved?: boolean; rejection_reason?: string | null }) => !s.approved && s.rejection_reason && s.created_by === user.id);
+    setStickers(approved);
+    setPendingStickers(pending);
+    setRejectedStickers(rejected);
+
+    // If admin, load all pending stickers with creator info
+    if (adminStatus) {
+      const { data: allPending } = await supabase
+        .from("stickers")
+        .select(`
+          id,
+          name,
+          image_url,
+          created_by,
+          created_at,
+          creator:profiles(username)
+        `)
+        .eq("approved", false)
+        .is("rejection_reason", null)
+        .order("created_at", { ascending: true });
+      
+      if (allPending) {
+        setAllPendingStickers(
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          allPending.map((s: any) => ({
+            ...s,
+            creator_username: s.creator && Array.isArray(s.creator) ? s.creator[0]?.username : (s.creator as { username?: string })?.username
+          }))
+        );
+      }
+    }
+  }, [supabase, user]);
+
+  const refreshNotificationSettings = useCallback(async () => {
+    if (!user || !conversationId) {
+      setMuted(false);
+      return;
+    }
+
+    const { data, error } = await supabase
+      .from("conversation_notification_settings")
+      .select("muted")
+      .match({ conversation_id: conversationId, user_id: user.id })
+      .maybeSingle();
+
+    if (error) {
+      console.warn("[notifications] load failed:", error.message);
+      return;
+    }
+
+    setMuted(data?.muted ?? false);
+  }, [conversationId, supabase, user]);
+
+  const toggleMute = useCallback(async () => {
+    if (!user || !conversationId) return;
+    const targetMute = !muted;
+
+    const { data, error } = await supabase
+      .from("conversation_notification_settings")
+      .upsert({
+        conversation_id: conversationId,
+        user_id: user.id,
+        muted: targetMute,
+        updated_at: new Date().toISOString()
+      }, { onConflict: 'conversation_id,user_id' })
+      .select("muted")
+      .single();
+
+    if (error) {
+      setError(error.message);
+      return;
+    }
+
+    setMuted(data?.muted ?? targetMute);
+  }, [conversationId, muted, supabase, user]);
+
+  const refreshBlockStatus = useCallback(async () => {
+    if (!user || !otherUserId) {
+      setBlockStatus("none");
+      return;
+    }
+
+    // Check if current user blocked the other user
+    const { data: blockedByMe, error: errorByMe } = await supabase
+      .from("user_blocks")
+      .select("blocker_id, blocked_id")
+      .eq("blocker_id", user.id)
+      .eq("blocked_id", otherUserId)
+      .maybeSingle();
+
+    if (errorByMe) {
+      console.warn("[blocks] status failed:", errorByMe.message);
+      return;
+    }
+
+    if (blockedByMe) {
+      setBlockStatus("blockedByMe");
+      return;
+    }
+
+    // Check if other user blocked current user
+    const { data: blockedByOther, error: errorByOther } = await supabase
+      .from("user_blocks")
+      .select("blocker_id, blocked_id")
+      .eq("blocker_id", otherUserId)
+      .eq("blocked_id", user.id)
+      .maybeSingle();
+
+    if (errorByOther) {
+      console.warn("[blocks] status failed:", errorByOther.message);
+      return;
+    }
+
+    if (blockedByOther) {
+      setBlockStatus("blockedByOther");
+      return;
+    }
+
+    setBlockStatus("none");
+  }, [otherUserId, supabase, user]);
+
+  const handleBlockToggle = useCallback(async () => {
+    if (!user || !otherUserId) return;
+    if (typeof window === "undefined") return;
+
+    const isCurrentlyBlocked = blockStatus === "blockedByMe";
+    const message = isCurrentlyBlocked
+      ? "Engellemeyi kaldırmak istediğine emin misin?"
+      : "Bu kullanıcıyı engellemek istediğine emin misin?";
+
+    if (!window.confirm(message)) return;
+
+    if (isCurrentlyBlocked) {
+      const { error } = await supabase
+        .from("user_blocks")
+        .delete()
+        .match({ blocker_id: user.id, blocked_id: otherUserId });
+      if (error) {
+        setError(error.message);
+        return;
+      }
+      setBlockStatus("none");
+      return;
+    }
+
+    const { error } = await supabase
+      .from("user_blocks")
+      .insert({ blocker_id: user.id, blocked_id: otherUserId });
+    if (error) {
+      setError(error.message);
+      return;
+    }
+
+    setBlockStatus("blockedByMe");
+  }, [blockStatus, otherUserId, supabase, user]);
+
   const handleSwipeStart = useCallback((event: React.TouchEvent, messageId: string, mine: boolean) => {
     const touch = event.touches[0];
     if (!touch) return;
@@ -359,6 +738,171 @@ export function ChatWindow({
     }
   }, []);
 
+  const uploadMedia = useCallback(
+    async (file: File) => {
+      console.log("[uploadMedia] Starting upload for file:", file.name, "size:", file.size);
+      if (!conversationId || !user) throw new Error("Eksik bilgiler");
+      const sanitizedName = encodeURIComponent(file.name.replace(/[^a-zA-Z0-9._-]/g, "_"));
+      const path = `${conversationId}/${user.id}/${Date.now()}-${sanitizedName}`;
+      console.log("[uploadMedia] Uploading to path:", path);
+      const { error } = await supabase.storage.from(CHAT_MEDIA_BUCKET).upload(path, file, { upsert: true });
+      if (error) {
+        console.error("[uploadMedia] Upload error:", error);
+        throw error;
+      }
+      console.log("[uploadMedia] Upload successful");
+      const { data } = supabase.storage.from(CHAT_MEDIA_BUCKET).getPublicUrl(path);
+      console.log("[uploadMedia] Public URL:", data.publicUrl);
+      return data.publicUrl;
+    },
+    [conversationId, supabase, user]
+  );
+
+  const handleAttachmentChange = useCallback(
+    (event: React.ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0];
+      if (!file) return;
+      if (!ALLOWED_MEDIA_MIME_TYPES.includes(file.type)) {
+        setError("Bu dosya türü desteklenmiyor.");
+        event.target.value = "";
+        return;
+      }
+      if (file.size > MAX_ATTACHMENT_SIZE) {
+        setError("Dosya 10MB'den büyük olamaz.");
+        event.target.value = "";
+        return;
+      }
+      setError(null);
+      if (attachmentPreview) {
+        URL.revokeObjectURL(attachmentPreview);
+      }
+      setAttachmentFile(file);
+      setAttachmentPreview(URL.createObjectURL(file));
+      event.target.value = "";
+    },
+    [attachmentPreview]
+  );
+
+  const clearAttachment = useCallback(() => {
+    if (attachmentPreview) {
+      URL.revokeObjectURL(attachmentPreview);
+    }
+    setAttachmentFile(null);
+    setAttachmentPreview(null);
+    if (attachmentInputRef.current) {
+      attachmentInputRef.current.value = "";
+    }
+  }, [attachmentPreview]);
+
+  const handleStickerUploadChange = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    if (!ALLOWED_MEDIA_MIME_TYPES.includes(file.type)) {
+      setStickerUploadError("Bu dosya türü desteklenmiyor.");
+      event.target.value = "";
+      return;
+    }
+    if (file.size > MAX_ATTACHMENT_SIZE) {
+      setStickerUploadError("Dosya 10MB'den büyük olamaz.");
+      event.target.value = "";
+      return;
+    }
+    setStickerUploadError(null);
+    setStickerUploadFile(file);
+    setStickerUploadPreview(URL.createObjectURL(file));
+    event.target.value = "";
+  }, []);
+
+  const handleStickerUpload = useCallback(async () => {
+    if (!user) return;
+    if (!stickerUploadName.trim()) {
+      setStickerUploadError("Sticker adı gerekli.");
+      return;
+    }
+    if (!stickerUploadFile) {
+      setStickerUploadError("Bir sticker dosyası seçmelisin.");
+      return;
+    }
+
+    setStickerUploading(true);
+    setStickerUploadError(null);
+
+    try {
+      const sanitizedName = encodeURIComponent(stickerUploadFile.name.replace(/[^a-zA-Z0-9._-]/g, "_"));
+      const path = `stickers/${user.id}/${Date.now()}-${sanitizedName}`;
+      const { error: uploadErr } = await supabase.storage.from(CHAT_MEDIA_BUCKET).upload(path, stickerUploadFile, { upsert: true });
+      if (uploadErr) throw uploadErr;
+      const { data: urlData } = supabase.storage.from(CHAT_MEDIA_BUCKET).getPublicUrl(path);
+      const { error: insertError } = await supabase.from("stickers").insert({
+        name: stickerUploadName.trim(),
+        image_url: urlData.publicUrl,
+        created_by: user.id,
+        approved: false
+      });
+      if (insertError) throw insertError;
+      setStickerUploadError(null);
+      setStickerUploadName("");
+      setStickerUploadFile(null);
+      if (stickerUploadPreview) {
+        URL.revokeObjectURL(stickerUploadPreview);
+      }
+      setStickerUploadPreview(null);
+      if (stickerUploadInputRef.current) {
+        stickerUploadInputRef.current.value = "";
+      }
+      // Show success message
+      setTimeout(() => {
+        setStickerUploadError(null);
+      }, 2000);
+      await loadStickers();
+    } catch (uploadError) {
+      const message = uploadError instanceof Error ? uploadError.message : "Sticker yüklenemedi.";
+      setStickerUploadError(message);
+    } finally {
+      setStickerUploading(false);
+    }
+  }, [loadStickers, stickerUploadFile, stickerUploadName, stickerUploadPreview, supabase, user]);
+
+  const handleStickerDelete = useCallback(
+    async (stickerId: string) => {
+      if (!user) return;
+      if (!window.confirm("Bu stickeri silmek istediğine emin misin?")) return;
+
+      setStickerDeleting(stickerId);
+      try {
+        const { error } = await supabase.from("stickers").delete().eq("id", stickerId).eq("created_by", user.id);
+        if (error) throw error;
+        await loadStickers();
+      } catch (deleteError) {
+        const message = deleteError instanceof Error ? deleteError.message : "Sticker silinemedi.";
+        setStickerUploadError(message);
+      } finally {
+        setStickerDeleting(null);
+      }
+    },
+    [loadStickers, supabase, user]
+  );
+
+  const toggleMediaPicker = useCallback(() => {
+    setMediaPickerOpen((prev) => !prev);
+    if (!mediaPickerOpen) {
+      // Klavyeyi kapat
+      const input = inputRef.current;
+      if (input) {
+        input.blur();
+      }
+    }
+  }, [mediaPickerOpen]);
+
+  const handleEmojiSelect = useCallback(
+    (emoji: string) => {
+      setText((prev) => prev + emoji);
+      setTimeout(focusInputWithoutScroll, 0);
+      setMediaPickerOpen(false); // Picker'ı kapat
+    },
+    [focusInputWithoutScroll]
+  );
+
   useEffect(() => {
     if (!replyTarget || editingTarget) return;
     setTimeout(focusInputWithoutScroll, 0);
@@ -377,11 +921,11 @@ export function ChatWindow({
   }, [messages.length]);
 
   useEffect(() => {
-    if (!conversationId) return;
-    const onFocus = () => void markRead();
-    window.addEventListener("focus", onFocus);
-    return () => window.removeEventListener("focus", onFocus);
-  }, [conversationId, markRead]);
+    if (!conversationId || !user) return;
+    void loadStickers();
+    void refreshNotificationSettings();
+    void refreshBlockStatus();
+  }, [conversationId, loadStickers, refreshBlockStatus, refreshNotificationSettings, user]);
 
   useEffect(() => {
     if (!conversationId || !user) return;
@@ -480,7 +1024,7 @@ export function ChatWindow({
           .eq("conversation_id", conversationId),
         supabase
           .from("messages")
-          .select("id, conversation_id, sender_id, content, type, replied_to(id, content, sender_id), created_at, is_read, deleted, edited")
+          .select("id, conversation_id, sender_id, content, type, replied_to(id, content, sender_id), created_at, is_read, deleted, edited, media_url, sticker_id, sticker:stickers(id, name, image_url, created_by)")
           .eq("conversation_id", conversationId)
           .order("created_at", { ascending: true })
       ]);
@@ -548,7 +1092,21 @@ export function ChatWindow({
           filter: `conversation_id=eq.${conversationId}`
         },
         async (payload) => {
-          const withReply = await hydrateRealtimeReply(payload.new as MessageRowRaw);
+          let rawMessage = payload.new as MessageRowRaw;
+          
+          // Realtime events don't include relationship expansions, so we need to fetch the sticker if needed
+          if (rawMessage.type === "sticker" && rawMessage.sticker_id && !rawMessage.sticker) {
+            const { data: stickerData } = await supabase
+              .from("stickers")
+              .select("id, name, image_url, created_by")
+              .eq("id", rawMessage.sticker_id)
+              .maybeSingle();
+            if (stickerData) {
+              rawMessage = { ...rawMessage, sticker: stickerData };
+            }
+          }
+          
+          const withReply = await hydrateRealtimeReply(rawMessage);
           const nextMessage = normalizeMessage(withReply);
 
           setMessages((prev) => (prev.some((item) => item.id === nextMessage.id) ? prev : [...prev, nextMessage]));
@@ -563,8 +1121,22 @@ export function ChatWindow({
           table: "messages",
           filter: `conversation_id=eq.${conversationId}`
         },
-        (payload) => {
-          const nextMessage = normalizeMessage(payload.new as MessageRowRaw);
+        async (payload) => {
+          let rawMessage = payload.new as MessageRowRaw;
+          
+          // Realtime events don't include relationship expansions, so we need to fetch the sticker if needed
+          if (rawMessage.type === "sticker" && rawMessage.sticker_id && !rawMessage.sticker) {
+            const { data: stickerData } = await supabase
+              .from("stickers")
+              .select("id, name, image_url, created_by")
+              .eq("id", rawMessage.sticker_id)
+              .maybeSingle();
+            if (stickerData) {
+              rawMessage = { ...rawMessage, sticker: stickerData };
+            }
+          }
+          
+          const nextMessage = normalizeMessage(rawMessage);
           setMessages((prev) => prev.map((item) => (item.id === nextMessage.id ? { ...item, ...nextMessage } : item)));
           if (nextMessage.deleted) {
             setReplyTarget((prev) => (prev?.id === nextMessage.id ? null : prev));
@@ -624,6 +1196,80 @@ export function ChatWindow({
     };
   }, [conversationId, markRead, supabase, user]);
 
+  // Separate useEffect for block and notification listeners to avoid infinite loading loop
+  useEffect(() => {
+    if (!user) return;
+
+    const blockChannel = supabase
+      .channel(`block-notif:${user.id}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "user_blocks",
+          filter: `or(blocker_id.eq.${user.id},blocked_id.eq.${user.id})`
+        },
+        () => {
+          void refreshBlockStatus();
+        }
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "DELETE",
+          schema: "public",
+          table: "user_blocks",
+          filter: `or(blocker_id.eq.${user.id},blocked_id.eq.${user.id})`
+        },
+        () => {
+          void refreshBlockStatus();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      void supabase.removeChannel(blockChannel);
+    };
+  }, [user, refreshBlockStatus, supabase]);
+
+  // Separate useEffect for notification settings
+  useEffect(() => {
+    if (!user || !conversationId) return;
+
+    const notificationChannel = supabase
+      .channel(`notif-settings:${conversationId}:${user.id}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "conversation_notification_settings",
+          filter: `and(conversation_id.eq.${conversationId},user_id.eq.${user.id})`
+        },
+        () => {
+          void refreshNotificationSettings();
+        }
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "conversation_notification_settings",
+          filter: `and(conversation_id.eq.${conversationId},user_id.eq.${user.id})`
+        },
+        () => {
+          void refreshNotificationSettings();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      void supabase.removeChannel(notificationChannel);
+    };
+  }, [conversationId, user, refreshNotificationSettings, supabase]);
+
   const deleteMessage = useCallback(
     async (message: MessageRow) => {
       if (!user) return;
@@ -654,8 +1300,61 @@ export function ChatWindow({
     [activeMessageId, editingTarget?.id, replyTarget?.id, supabase, user]
   );
 
+  const sendStickerMessage = useCallback(
+    async (sticker: MessageStickerRowRaw) => {
+      if (!user || !conversationId) return;
+      if (blockedByOther) {
+        setError("Bu kullanıcı seni engelledi.");
+        return;
+      }
+      if (sendingRef.current) return;
+
+      sendingRef.current = true;
+      setSending(true);
+      setError(null);
+      autoScrollRef.current = true;
+
+      try {
+        const payload = {
+          conversation_id: conversationId,
+          sender_id: user.id,
+          content: sticker.name,
+          type: "sticker" as const,
+          sticker_id: sticker.id
+        };
+
+        const { data: inserted, error: insertError } = await supabase
+          .from("messages")
+          .insert(payload)
+          .select(
+            "id, conversation_id, sender_id, content, type, replied_to(id, content, sender_id), created_at, is_read, deleted, edited, media_url, sticker_id, sticker:stickers(id, name, image_url, created_by)"
+          )
+          .single();
+        if (insertError) {
+          setError(insertError.message);
+          return;
+        }
+
+        if (inserted) {
+          const nextMessage = normalizeMessage(inserted as MessageRowRaw);
+          setMessages((prev) => (prev.some((item) => item.id === nextMessage.id) ? prev : [...prev, nextMessage]));
+          void notifyRecipientsForPush(nextMessage.id);
+        }
+
+        setReplyTarget(null);
+        setActiveMessageId(null);
+      } finally {
+        sendingRef.current = false;
+        setSending(false);
+        setMediaPickerOpen(false); // Picker'ı kapat
+      }
+    },
+    [blockedByOther, conversationId, notifyRecipientsForPush, supabase, user]
+  );
+
   const send = useCallback(async () => {
-    if (!user || !conversationId || !trimmedText) return;
+    console.log("[send] Send called, trimmedText:", trimmedText, "attachmentFile:", !!attachmentFile);
+    if (!user || !conversationId || (!trimmedText && !attachmentFile)) return;
     if (!networkOnline) {
       setError("Bağlantı yok. Mesaj gönderilemedi.");
       return;
@@ -690,8 +1389,9 @@ export function ChatWindow({
         conversation_id: string;
         sender_id: string;
         content: string;
-        type: "text";
+        type: "text" | "image";
         replied_to?: string;
+        media_url?: string;
       } = {
         conversation_id: conversationId,
         sender_id: user.id,
@@ -701,10 +1401,18 @@ export function ChatWindow({
 
       if (replyTarget) payload.replied_to = replyTarget.id;
 
+      if (attachmentFile) {
+        console.log("[send] Attachment file present:", attachmentFile.name);
+        payload.media_url = await uploadMedia(attachmentFile);
+        console.log("[send] Media URL set:", payload.media_url);
+        payload.type = "image";
+        clearAttachment();
+      }
+
       const { data: inserted, error: insertError } = await supabase
         .from("messages")
         .insert(payload)
-        .select("id, conversation_id, sender_id, content, type, replied_to(id, content, sender_id), created_at, is_read, deleted")
+        .select("id, conversation_id, sender_id, content, type, replied_to(id, content, sender_id), created_at, is_read, deleted, edited, media_url, sticker_id, sticker:stickers(id, name, image_url, created_by)")
         .single();
       if (insertError) {
         setError(insertError.message);
@@ -743,7 +1451,10 @@ export function ChatWindow({
     supabase,
     trimmedText,
     user,
-    networkOnline
+    networkOnline,
+    attachmentFile,
+    clearAttachment,
+    uploadMedia
   ]);
 
   if (!conversationId) {
@@ -769,12 +1480,18 @@ export function ChatWindow({
             </button>
           ) : null}
 
-          {otherAvatarUrl ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img alt={`${title} avatar`} className="h-9 w-9 rounded-full border border-zinc-800 object-cover" src={otherAvatarUrl} />
+          {!blockStatus || blockStatus === "none" ? (
+            otherAvatarUrl ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img alt={`${title} avatar`} className="h-9 w-9 rounded-full border border-zinc-800 object-cover" src={otherAvatarUrl} />
+            ) : (
+              <div className="grid h-9 w-9 place-items-center rounded-full border border-zinc-800 bg-zinc-900 text-xs font-semibold text-zinc-200">
+                {title.slice(0, 1).toUpperCase()}
+              </div>
+            )
           ) : (
-            <div className="grid h-9 w-9 place-items-center rounded-full border border-zinc-800 bg-zinc-900 text-xs font-semibold text-zinc-200">
-              {title.slice(0, 1).toUpperCase()}
+            <div className="grid h-9 w-9 place-items-center rounded-full border border-zinc-800 bg-zinc-800 text-xs font-semibold text-zinc-400">
+              ?
             </div>
           )}
 
@@ -788,18 +1505,41 @@ export function ChatWindow({
             >
               {!networkOnline
                 ? "bağlantı yok"
-                : typingLabel
-                  ? `${typingLabel}${typingDots}`
-                  : otherUserId
-                    ? isOnline(otherUserId)
-                      ? "aktif"
-                      : "çevrimdışı"
-                    : "grup sohbeti"}
+                : blockStatus !== "none"
+                  ? blockStatus === "blockedByMe"
+                    ? "Engellendi"
+                    : "Seni engelledi"
+                  : typingLabel
+                    ? `${typingLabel}${typingDots}`
+                    : otherUserId
+                      ? isOnline(otherUserId)
+                        ? "aktif"
+                        : "çevrimdışı"
+                      : "grup sohbeti"}
             </p>
           </div>
         </div>
 
-        <span className="text-[11px] text-zinc-600">{conversationId.slice(0, 8)}</span>
+        <div className="flex items-center gap-2">
+          <button
+            aria-label={muted ? "Bildirimleri aç" : "Bildirimleri sustur"}
+            className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900/50 text-zinc-200 hover:bg-zinc-800"
+            onClick={() => void toggleMute()}
+            type="button"
+          >
+            {muted ? <BellOff className="h-4 w-4" /> : <Bell className="h-4 w-4" />}
+          </button>
+          {otherUserId ? (
+            <button
+              aria-label={blockStatus === "blockedByMe" ? "Engellemeyi kaldır" : "Engelle"}
+              className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900/50 text-zinc-200 hover:bg-zinc-800"
+              onClick={() => void handleBlockToggle()}
+              type="button"
+            >
+              <Shield className="h-4 w-4" />
+            </button>
+          ) : null}
+        </div>
       </header>
 
       <div
@@ -868,6 +1608,8 @@ export function ChatWindow({
                             "rounded-2xl border px-3 py-2 text-sm break-words break-all",
                             message.deleted
                               ? "border-zinc-700 bg-zinc-800/60 text-zinc-400 italic"
+                              : (message.type === "image" || message.type === "sticker")
+                              ? "border-transparent bg-transparent text-zinc-100"
                               : mine
                               ? "border-blue-900/60 bg-blue-600/85 text-white"
                               : "border-zinc-800 bg-zinc-900/70 text-zinc-100",
@@ -911,12 +1653,38 @@ export function ChatWindow({
                             </button>
                           ) : null}
 
-                          <p className="whitespace-pre-wrap break-words">
-                            {message.deleted ? "Bir mesaj silindi" : message.content}
-                            {message.edited && !message.deleted ? (
-                              <span className="ml-1 text-[10px] text-zinc-400">(düzenlendi)</span>
-                            ) : null}
-                          </p>
+                          {message.type === "sticker" && message.sticker ? (
+                            <div className="flex flex-col items-center">
+                              <img
+                                alt={message.sticker.name}
+                                className="max-h-32 max-w-32 rounded-lg object-contain"
+                                src={message.sticker.image_url}
+                              />
+                            </div>
+                          ) : message.type === "image" && message.mediaUrl ? (
+                            <div className="flex flex-col">
+                              <img
+                                alt="Gönderilen resim"
+                                className="max-h-64 max-w-full rounded-lg object-contain"
+                                src={message.mediaUrl}
+                              />
+                              {message.content ? (
+                                <p className="mt-2 whitespace-pre-wrap break-words">
+                                  {renderLinkifiedText(message.content)}
+                                  {message.edited ? (
+                                    <span className="ml-1 text-[10px] text-zinc-400">(düzenlendi)</span>
+                                  ) : null}
+                                </p>
+                              ) : null}
+                            </div>
+                          ) : (
+                            <p className="whitespace-pre-wrap break-words">
+                              {message.deleted ? "Bir mesaj silindi" : renderLinkifiedText(message.content)}
+                              {message.edited && !message.deleted ? (
+                                <span className="ml-1 text-[10px] text-zinc-400">(düzenlendi)</span>
+                              ) : null}
+                            </p>
+                          )}
 
                           <div
                             className={cn(
@@ -1015,6 +1783,17 @@ export function ChatWindow({
         <div className="border-t border-amber-900/60 bg-amber-950/40 px-3 py-2 text-xs text-amber-200">
           İnternet bağlantısı yok. Gönderme düğmesi bağlantı gelene kadar pasif.
         </div>
+      ) : blockStatus === "blockedByMe" ? (
+        <div
+          onClick={() => void handleBlockToggle()}
+          className="border-t border-yellow-900/60 bg-yellow-950/40 px-3 py-2 text-xs text-yellow-200 cursor-pointer hover:bg-yellow-950/60 transition-colors"
+        >
+          Bu kullanıcıyı engellediniz. Engelini açmak için dokunun.
+        </div>
+      ) : blockedByOther ? (
+        <div className="border-t border-red-900/60 bg-red-950/40 px-3 py-2 text-xs text-red-200">
+          Bu kullanıcı seni engelledi. Mesaj gönderemezsin.
+        </div>
       ) : null}
 
       <form
@@ -1024,10 +1803,60 @@ export function ChatWindow({
           void send();
         }}
       >
+        <input
+          ref={attachmentInputRef}
+          accept={ALLOWED_MEDIA_MIME_TYPES.join(",")}
+          className="hidden"
+          onChange={handleAttachmentChange}
+          type="file"
+        />
+        <button
+          aria-label="Resim ekle"
+          className={cn(
+            "inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900 text-zinc-300 hover:bg-zinc-800",
+            (blockedByOther || blockStatus === "blockedByMe") && "opacity-60 cursor-not-allowed"
+          )}
+          disabled={blockedByOther || blockStatus === "blockedByMe"}
+          onClick={() => attachmentInputRef.current?.click()}
+          type="button"
+        >
+          <ImagePlus className="h-4 w-4" />
+        </button>
+        <button
+          aria-label="Emoji ve Sticker"
+          className={cn(
+            "inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900 text-zinc-300 hover:bg-zinc-800",
+            (blockedByOther || blockStatus === "blockedByMe") && "opacity-60 cursor-not-allowed"
+          )}
+          disabled={blockedByOther || blockStatus === "blockedByMe"}
+          onClick={toggleMediaPicker}
+          type="button"
+        >
+          <Sticker className="h-4 w-4" />
+        </button>
+
+        {attachmentPreview ? (
+          <div className="relative">
+            <img
+              alt="Önizleme"
+              className="h-20 w-20 rounded-lg border border-zinc-700 object-cover"
+              src={attachmentPreview}
+            />
+            <button
+              aria-label="Kaldır"
+              className="absolute -top-2 -right-2 inline-flex h-6 w-6 items-center justify-center rounded-full border border-zinc-700 bg-zinc-900 text-zinc-300 hover:bg-zinc-800"
+              onClick={clearAttachment}
+              type="button"
+            >
+              <X className="h-3 w-3" />
+            </button>
+          </div>
+        ) : null}
+
         <textarea
           ref={inputRef}
           className="min-h-[44px] w-full flex-1 resize-none rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none placeholder:text-zinc-500 focus:border-zinc-700 disabled:opacity-60"
-          disabled={sending}
+          disabled={sending || blockedByOther || blockStatus === "blockedByMe"}
           onChange={(event) => setText(event.target.value)}
           onKeyDown={(event) => {
             if (event.key !== "Enter") return;
@@ -1054,6 +1883,409 @@ export function ChatWindow({
           <SendHorizontal className="h-4 w-4" />
         </button>
       </form>
+
+      {mediaPickerOpen ? (
+        <div className="border-t border-zinc-800/80 bg-zinc-900/30 p-3">
+          <div className="mb-2 flex gap-2">
+            <button
+              className={cn(
+                "rounded-lg px-3 py-1 text-sm",
+                selectedMediaTab === "emoji" ? "bg-zinc-700 text-white" : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700"
+              )}
+              onClick={() => setSelectedMediaTab("emoji")}
+              type="button"
+            >
+              Emoji
+            </button>
+            <button
+              className={cn(
+                "rounded-lg px-3 py-1 text-sm",
+                selectedMediaTab === "sticker" ? "bg-zinc-700 text-white" : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700"
+              )}
+              onClick={() => setSelectedMediaTab("sticker")}
+              type="button"
+            >
+              Sticker
+            </button>
+            <button
+              className={cn(
+                "rounded-lg px-3 py-1 text-sm",
+                selectedMediaTab === "gif" ? "bg-zinc-700 text-white" : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700"
+              )}
+              onClick={() => setSelectedMediaTab("gif")}
+              type="button"
+              disabled
+            >
+              GIF
+            </button>
+          </div>
+
+          {selectedMediaTab === "emoji" ? (
+            <>
+              <div className="mb-2 flex gap-2">
+                {EMOJI_CATEGORIES.map((category) => (
+                  <button
+                    key={category.id}
+                    className={cn(
+                      "rounded-lg border px-2 py-1 text-xs",
+                      selectedEmojiCategory === category.id
+                        ? "border-zinc-600 bg-zinc-800 text-zinc-100"
+                        : "border-zinc-800 bg-zinc-900 text-zinc-400 hover:bg-zinc-800"
+                    )}
+                    onClick={() => setSelectedEmojiCategory(category.id)}
+                    type="button"
+                  >
+                    {category.icon}
+                  </button>
+                ))}
+              </div>
+              <div className="grid grid-cols-8 gap-1">
+                {EMOJI_CATEGORIES.find((cat) => cat.id === selectedEmojiCategory)?.items.map((emoji) => (
+                  <button
+                    key={emoji}
+                    className="h-8 w-8 rounded-lg border border-zinc-800 bg-zinc-900 text-lg hover:bg-zinc-800"
+                    onClick={() => handleEmojiSelect(emoji)}
+                    type="button"
+                  >
+                    {emoji}
+                  </button>
+                ))}
+              </div>
+            </>
+          ) : selectedMediaTab === "sticker" ? (
+            <>
+              <div className="mb-3 flex items-center justify-between border-b border-zinc-800 pb-2">
+                <h3 className="text-sm font-semibold text-zinc-100">Stickerlarım</h3>
+                <div className="flex items-center gap-2">
+                  {isAdmin && allPendingStickers.length > 0 ? (
+                    <button
+                      className="inline-flex items-center gap-1 rounded-lg border border-orange-700/50 bg-orange-600/20 px-2 py-1.5 text-xs font-medium text-orange-300 transition-colors hover:bg-orange-600/30"
+                      onClick={() => setShowModerationPanel(!showModerationPanel)}
+                      type="button"
+                    >
+                      <AlertCircle className="h-3 w-3" />
+                      Onay Bekleyen ({allPendingStickers.length})
+                    </button>
+                  ) : null}
+                  <button
+                    className="inline-flex items-center gap-1 rounded-lg border border-emerald-700/50 bg-emerald-600/20 px-2 py-1.5 text-xs font-medium text-emerald-300 transition-colors hover:bg-emerald-600/30"
+                    onClick={() => setStickerUploadName("Yeni Sticker")}
+                    type="button"
+                  >
+                    <Plus className="h-3 w-3" />
+                    Yenisini Ekle
+                  </button>
+                </div>
+              </div>
+
+              {/* Admin moderation panel */}
+              {isAdmin && showModerationPanel && allPendingStickers.length > 0 ? (
+                <div className="mb-4 rounded-lg border border-orange-900/40 bg-orange-950/20 p-3 max-h-60 overflow-y-auto">
+                  <p className="mb-2 text-xs font-semibold text-orange-300">Onay Bekleyen Stickerlar</p>
+                  <div className="space-y-2">
+                    {allPendingStickers.map((sticker) => (
+                      <div key={sticker.id} className="rounded-lg border border-orange-900/50 bg-orange-900/10 p-2">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="flex items-start gap-2 flex-1 min-w-0">
+                            <div className="h-10 w-10 shrink-0 rounded border border-orange-900/50 bg-zinc-900 p-0.5">
+                              <img
+                                alt={sticker.name}
+                                className="h-full w-full rounded object-contain"
+                                src={sticker.image_url}
+                              />
+                            </div>
+                            <div className="flex-1 min-w-0 text-xs">
+                              <p className="font-semibold text-orange-300 truncate">{sticker.name}</p>
+                              <p className="text-orange-400 text-[11px]">~ {sticker.creator_username || "bilinmiyor"}</p>
+                            </div>
+                          </div>
+                          <div className="flex gap-1 shrink-0">
+                            <button
+                              className="inline-flex items-center justify-center rounded px-2 py-1 text-xs bg-emerald-600/30 text-emerald-300 hover:bg-emerald-600/40 border border-emerald-700/50 transition-colors"
+                              onClick={async () => {
+                                const { error } = await supabase
+                                  .from("stickers")
+                                  .update({ approved: true, rejection_reason: null })
+                                  .eq("id", sticker.id);
+                                if (!error) {
+                                  await loadStickers();
+                                }
+                              }}
+                              type="button"
+                            >
+                              Onayla
+                            </button>
+                            <button
+                              className="inline-flex items-center justify-center rounded px-2 py-1 text-xs bg-red-600/30 text-red-300 hover:bg-red-600/40 border border-red-700/50 transition-colors"
+                              onClick={async () => {
+                                const { error } = await supabase
+                                  .from("stickers")
+                                  .update({ rejection_reason: "İçerik politikamızı ihlal ediyor" })
+                                  .eq("id", sticker.id);
+                                if (!error) {
+                                  await loadStickers();
+                                }
+                              }}
+                              type="button"
+                            >
+                              Reddet
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+
+              {stickerUploadName ? (
+                <div className="mb-4 rounded-xl border border-zinc-700 bg-zinc-800/60 p-4">
+                  <h4 className="mb-3 text-xs font-semibold uppercase tracking-wide text-zinc-400">Yeni Sticker Yükle</h4>
+
+                  {/* Drag-and-drop area */}
+                  <div
+                    className={cn(
+                      "mb-3 rounded-lg border-2 border-dashed p-4 text-center transition-colors",
+                      stickerUploadFile
+                        ? "border-emerald-600/60 bg-emerald-600/10"
+                        : "border-zinc-600 bg-zinc-900/30 hover:border-zinc-500 hover:bg-zinc-900/50"
+                    )}
+                    onClick={() => stickerUploadInputRef.current?.click()}
+                    onDragOver={(e) => {
+                      e.preventDefault();
+                      e.currentTarget.classList.add("border-emerald-600/60", "bg-emerald-600/10");
+                    }}
+                    onDragLeave={(e) => {
+                      e.currentTarget.classList.remove("border-emerald-600/60", "bg-emerald-600/10");
+                    }}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      e.currentTarget.classList.remove("border-emerald-600/60", "bg-emerald-600/10");
+                      const file = e.dataTransfer.files?.[0];
+                      if (file) {
+                        const event = {
+                          target: { files: e.dataTransfer.files, value: "" }
+                        } as React.ChangeEvent<HTMLInputElement>;
+                        handleStickerUploadChange(event);
+                      }
+                    }}
+                    role="button"
+                    tabIndex={0}
+                  >
+                    <input
+                      ref={stickerUploadInputRef}
+                      accept={ALLOWED_MEDIA_MIME_TYPES.join(",")}
+                      className="hidden"
+                      onChange={handleStickerUploadChange}
+                      type="file"
+                    />
+                    {stickerUploadPreview ? (
+                      <div className="flex flex-col items-center gap-2">
+                        <img
+                          alt="Önizleme"
+                          className="h-16 w-16 rounded-lg object-contain"
+                          src={stickerUploadPreview}
+                        />
+                        <p className="text-xs text-zinc-400">
+                          {stickerUploadFile?.name ? `Seçili: ${stickerUploadFile.name}` : "Dosya seçildi"}
+                        </p>
+                        <button
+                          className="text-xs text-zinc-500 hover:text-zinc-300 underline"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            stickerUploadInputRef.current?.click();
+                          }}
+                          type="button"
+                        >
+                          Başka dosya seç
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="flex flex-col items-center gap-2">
+                        <Upload className="h-5 w-5 text-zinc-500" />
+                        <div>
+                          <p className="text-xs font-medium text-zinc-300">Dosya sürükle ve bırak</p>
+                          <p className="text-[11px] text-zinc-500">veya tıkla</p>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Name input */}
+                  <input
+                    className="mb-3 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none placeholder:text-zinc-600 focus:border-zinc-600"
+                    onChange={(event) => setStickerUploadName(event.target.value)}
+                    placeholder="Sticker adını yaz..."
+                    type="text"
+                    value={stickerUploadName}
+                  />
+
+                  {/* Error/Success message */}
+                  {stickerUploadError ? (
+                    <div className="mb-3 rounded-lg border border-red-900/50 bg-red-900/20 p-2 text-xs text-red-300 flex items-center gap-2">
+                      <X className="h-3 w-3 shrink-0" />
+                      {stickerUploadError}
+                    </div>
+                  ) : null}
+
+                  {/* Action buttons */}
+                  <div className="flex gap-2">
+                    <button
+                      className={cn(
+                        "flex-1 inline-flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-xs font-medium transition-colors disabled:opacity-50",
+                        stickerUploading || !stickerUploadFile || !stickerUploadName.trim()
+                          ? "border border-zinc-700 bg-zinc-900 text-zinc-400"
+                          : "border border-emerald-700/60 bg-emerald-600/30 text-emerald-300 hover:bg-emerald-600/40"
+                      )}
+                      disabled={stickerUploading || !stickerUploadFile || !stickerUploadName.trim()}
+                      onClick={() => void handleStickerUpload()}
+                      type="button"
+                    >
+                      {stickerUploading ? (
+                        <>
+                          <div className="h-3 w-3 animate-spin rounded-full border border-emerald-600 border-t-emerald-300" />
+                          Yükleniyor...
+                        </>
+                      ) : (
+                        <>
+                          <Check className="h-3 w-3" />
+                          Yükle
+                        </>
+                      )}
+                    </button>
+                    <button
+                      className="inline-flex items-center justify-center gap-2 rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-xs font-medium text-zinc-300 hover:bg-zinc-800 transition-colors"
+                      onClick={() => {
+                        setStickerUploadName("");
+                        setStickerUploadFile(null);
+                        if (stickerUploadPreview) {
+                          URL.revokeObjectURL(stickerUploadPreview);
+                        }
+                        setStickerUploadPreview(null);
+                        setStickerUploadError(null);
+                      }}
+                      type="button"
+                    >
+                      <X className="h-3 w-3" />
+                      İptal
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+
+              {/* Info banner */}
+              <div className="mb-3 rounded-lg border border-blue-900/40 bg-blue-950/20 p-3">
+                <p className="text-xs text-blue-300">
+                  <span className="font-semibold">💡 Bilgi:</span> Yüklediğiniz stickerler onay beklemektedir. Onaylandıktan sonra herkese görünecektir.
+                </p>
+              </div>
+
+              {/* Rejected stickers section */}
+              {rejectedStickers.length > 0 ? (
+                <div className="mb-4 rounded-lg border border-red-900/40 bg-red-950/20 p-3">
+                  <p className="mb-2 text-xs font-semibold text-red-300">Reddedilen Stickerlar ({rejectedStickers.length})</p>
+                  <div className="space-y-2">
+                    {rejectedStickers.map((sticker) => (
+                      <div key={sticker.id} className="rounded-lg border border-red-900/50 bg-red-900/10 p-2">
+                        <div className="flex items-start gap-2">
+                          <div className="h-12 w-12 shrink-0 rounded border border-red-900/50 bg-zinc-900 p-1">
+                            <img
+                              alt={sticker.name}
+                              className="h-full w-full rounded object-contain"
+                              src={sticker.image_url}
+                            />
+                          </div>
+                          <div className="flex-1 text-xs">
+                            <p className="font-semibold text-red-300">{sticker.name}</p>
+                            <p className="text-red-400">
+                              {(sticker as MessageStickerRowRaw & { rejection_reason?: string }).rejection_reason || "İçerik politikamızı ihlal ediyor"}
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+
+              {/* Pending stickers section */}
+              {pendingStickers.length > 0 ? (
+                <div className="mb-4 rounded-lg border border-yellow-900/40 bg-yellow-950/20 p-3">
+                  <p className="mb-2 text-xs font-semibold text-yellow-300">Onay Bekleniyor ({pendingStickers.length})</p>
+                  <div className="grid grid-cols-6 gap-2">
+                    {pendingStickers.map((sticker) => (
+                      <div key={sticker.id} className="group relative aspect-square opacity-60">
+                        <div className="h-full w-full rounded-lg border border-yellow-900/50 bg-zinc-900 p-1">
+                          <img
+                            alt={sticker.name}
+                            className="h-full w-full rounded object-contain"
+                            src={sticker.image_url}
+                          />
+                        </div>
+                        <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-black/50">
+                          <div className="text-[10px] font-bold text-yellow-300">Bekleme</div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+
+              {/* Approved sticker grid */}
+              <div className="space-y-3">
+                {stickers.length === 0 ? (
+                  <div className="rounded-lg border border-zinc-800 bg-zinc-900/30 p-6 text-center">
+                    <Sticker className="mx-auto mb-2 h-5 w-5 text-zinc-500" />
+                    <p className="text-xs text-zinc-500">Henüz sticker yok</p>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-6 gap-2">
+                    {stickers.map((sticker) => (
+                      <div key={sticker.id} className="group relative aspect-square">
+                        <button
+                          className="h-full w-full rounded-lg border border-zinc-800 bg-zinc-900 p-1 transition-all hover:border-zinc-700 hover:bg-zinc-800"
+                          onClick={() => void sendStickerMessage(sticker)}
+                          type="button"
+                        >
+                          <img
+                            alt={sticker.name}
+                            className="h-full w-full rounded object-contain"
+                            src={sticker.image_url}
+                          />
+                        </button>
+
+                        {/* Delete button - shown for user's own stickers */}
+                        {user?.id === sticker.created_by ? (
+                          <button
+                            aria-label="Sil"
+                            className="absolute -top-2 -right-2 inline-flex h-5 w-5 items-center justify-center rounded-full border border-red-700/60 bg-red-600/20 text-red-300 opacity-0 transition-opacity hover:bg-red-600/40 group-hover:opacity-100"
+                            disabled={stickerDeleting === sticker.id}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void handleStickerDelete(sticker.id);
+                            }}
+                            type="button"
+                          >
+                            {stickerDeleting === sticker.id ? (
+                              <div className="h-3 w-3 animate-spin rounded-full border border-red-600 border-t-red-300" />
+                            ) : (
+                              <Trash2 className="h-3 w-3" />
+                            )}
+                          </button>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </>
+          ) : (
+            <div className="py-8 text-center text-sm text-zinc-500">
+              GIF özelliği yakında eklenecek.
+            </div>
+          )}
+        </div>
+      ) : null}
     </div>
   );
 }

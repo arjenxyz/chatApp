@@ -9,7 +9,6 @@ export const metadata: Metadata = {
   manifest: "/manifest.json",
   applicationName: "ChatApp",
   appleWebApp: {
-    capable: true,
     statusBarStyle: "black-translucent",
     title: "ChatApp"
   },
@@ -33,10 +32,36 @@ export const viewport: Viewport = {
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
+  const devServiceWorkerCleanupScript = `
+    (() => {
+      if (typeof window === "undefined") return;
+      if (!("serviceWorker" in navigator)) return;
+      if (sessionStorage.getItem("__chatapp_dev_sw_cleaned__") === "1") return;
+
+      sessionStorage.setItem("__chatapp_dev_sw_cleaned__", "1");
+
+      void navigator.serviceWorker.getRegistrations().then((registrations) => {
+        for (const registration of registrations) {
+          void registration.unregister();
+        }
+      });
+
+      if (!("caches" in window)) return;
+      void caches.keys().then((keys) => {
+        for (const key of keys) {
+          void caches.delete(key);
+        }
+      });
+    })();
+  `;
+
   return (
     <html lang="tr" suppressHydrationWarning>
       <head>
         <meta content="yes" name="mobile-web-app-capable" />
+        {process.env.NODE_ENV !== "production" ? (
+          <script dangerouslySetInnerHTML={{ __html: devServiceWorkerCleanupScript }} />
+        ) : null}
       </head>
       <body className="min-h-screen">
         <Providers>{children}</Providers>

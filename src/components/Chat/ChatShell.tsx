@@ -1,6 +1,6 @@
 "use client";
 
-import { BellRing, CloudOff, LogOut } from "lucide-react";
+import { BellRing, CloudOff, LogOut, X } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import React, { useCallback, useEffect, useState } from "react";
 
@@ -54,6 +54,7 @@ export function ChatShell() {
   const [pushEnabled, setPushEnabled] = useState(false);
   const [pushBusy, setPushBusy] = useState(false);
   const [pushError, setPushError] = useState<string | null>(null);
+  const [pushPromptDismissed, setPushPromptDismissed] = useState(false);
 
   const vapidPublicKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
   const deepLinkConversationId = searchParams.get("conversation");
@@ -61,6 +62,41 @@ export function ChatShell() {
   useEffect(() => {
     setUsername(profile?.username ?? "");
   }, [profile?.username]);
+
+  const getPushPromptDismissStorageKey = useCallback(() => {
+    if (!user) return null;
+    return `chat.pushPromptDismissed.${user.id}`;
+  }, [user]);
+
+  const persistPushPromptDismissed = useCallback(
+    (dismissed: boolean) => {
+      setPushPromptDismissed(dismissed);
+      if (typeof window === "undefined") return;
+
+      const key = getPushPromptDismissStorageKey();
+      if (!key) return;
+
+      if (dismissed) {
+        window.localStorage.setItem(key, "1");
+        return;
+      }
+
+      window.localStorage.removeItem(key);
+    },
+    [getPushPromptDismissStorageKey]
+  );
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const key = getPushPromptDismissStorageKey();
+    if (!key) {
+      setPushPromptDismissed(false);
+      return;
+    }
+
+    setPushPromptDismissed(window.localStorage.getItem(key) === "1");
+  }, [getPushPromptDismissStorageKey]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -118,6 +154,14 @@ export function ChatShell() {
 
   useEffect(() => {
     if (typeof window === "undefined") return;
+
+    if (process.env.NODE_ENV !== "production") {
+      setPushSupported(false);
+      setPushEnabled(false);
+      setPushPermission("default");
+      setPushError(null);
+      return;
+    }
 
     if (!isMobile) {
       setPushSupported(false);
@@ -295,6 +339,9 @@ export function ChatShell() {
   }, [waitForActiveServiceWorker]);
 
   const getPushRegistration = useCallback(async (): Promise<ServiceWorkerRegistration> => {
+    if (process.env.NODE_ENV !== "production") {
+      throw new Error("Push bildirimleri local development ortamında kapalı.");
+    }
     if (!("serviceWorker" in navigator)) {
       throw new Error("Service Worker desteklenmiyor.");
     }
@@ -414,13 +461,14 @@ export function ChatShell() {
       await savePushSubscription(subscription);
       setPushEnabled(true);
       setPushError(null);
+      persistPushPromptDismissed(true);
     } catch (error) {
       setPushEnabled(false);
       setPushError(error instanceof Error ? error.message : "Push aktivasyonu başarısız.");
     } finally {
       setPushBusy(false);
     }
-  }, [getPushRegistration, isMobile, isPWA, pushSupported, savePushSubscription, user, vapidPublicKey]);
+  }, [getPushRegistration, isMobile, isPWA, persistPushPromptDismissed, pushSupported, savePushSubscription, user, vapidPublicKey]);
 
   useEffect(() => {
     void syncPushSubscription();
@@ -428,7 +476,11 @@ export function ChatShell() {
 
   const showUsernameSetup = Boolean(user && profile && !profile.username);
   const showPushPrompt =
-    isMobile && pushSupported && user && (pushPermission !== "granted" || !pushEnabled || Boolean(pushError));
+    isMobile &&
+    pushSupported &&
+    user &&
+    !pushPromptDismissed &&
+    (pushPermission !== "granted" || !pushEnabled || Boolean(pushError));
 
   const promptInstall = useCallback(async () => {
     if (!installPromptEvent) return;
@@ -579,17 +631,27 @@ export function ChatShell() {
                   {pushError ? <p className="mt-1 text-xs text-red-200">{pushError}</p> : null}
                 </div>
 
-                <button
-                  className={cn(
-                    "shrink-0 rounded-xl border border-blue-700 bg-blue-600 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-500",
-                    pushBusy && "opacity-60"
-                  )}
-                  disabled={pushBusy || !isNetworkOnline}
-                  onClick={() => void enablePushNotifications()}
-                  type="button"
-                >
-                  {pushBusy ? "Açılıyor..." : "Aktifleştir"}
-                </button>
+                <div className="flex shrink-0 items-center gap-2">
+                  <button
+                    className={cn(
+                      "rounded-xl border border-blue-700 bg-blue-600 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-500",
+                      pushBusy && "opacity-60"
+                    )}
+                    disabled={pushBusy || !isNetworkOnline}
+                    onClick={() => void enablePushNotifications()}
+                    type="button"
+                  >
+                    {pushBusy ? "Açılıyor..." : "Aktifleştir"}
+                  </button>
+                  <button
+                    aria-label="Bildirim kutusunu kapat"
+                    className="rounded-lg border border-zinc-700 bg-zinc-900/80 p-2 text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
+                    onClick={() => persistPushPromptDismissed(true)}
+                    type="button"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </div>
               </div>
             </div>
           </section>

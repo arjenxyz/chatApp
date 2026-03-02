@@ -89,10 +89,34 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ sent: 0, skipped: true });
     }
 
+    // Check mute settings for recipients
+    const { data: muteSettings, error: muteError } = await supabaseAdmin
+      .from("conversation_notification_settings")
+      .select("user_id, muted")
+      .eq("conversation_id", body.conversationId)
+      .in("user_id", recipientIds);
+
+    if (muteError) {
+      console.warn("[push] failed to check mute settings:", muteError.message);
+      // Continue without filtering - better to send than not send
+    }
+
+    const mutedUserIds = new Set(
+      ((muteSettings as { user_id: string; muted: boolean }[] | null) ?? [])
+        .filter((setting) => setting.muted)
+        .map((setting) => setting.user_id)
+    );
+
+    const activeRecipientIds = recipientIds.filter((userId) => !mutedUserIds.has(userId));
+
+    if (activeRecipientIds.length === 0) {
+      return NextResponse.json({ sent: 0, skipped: true, muted: recipientIds.length });
+    }
+
     const { data: subscriptions, error: subscriptionsError } = await supabaseAdmin
       .from("push_subscriptions")
       .select("id, endpoint, p256dh, auth")
-      .in("user_id", recipientIds);
+      .in("user_id", activeRecipientIds);
 
     if (subscriptionsError) {
       return NextResponse.json({ error: subscriptionsError.message }, { status: 500 });
