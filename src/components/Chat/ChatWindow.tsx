@@ -1297,6 +1297,8 @@ export function ChatWindow({
       if (!user) return;
       if (message.sender_id !== user.id) return;
 
+      console.log("[deleteMessage] Deleting message:", message.id, "Type:", message.type, "Has sticker:", !!message.sticker, "Has mediaUrl:", !!message.mediaUrl);
+
       // mark message as deleted instead of removing it from the database
       const { error: deleteError } = await supabase
         .from("messages")
@@ -1304,13 +1306,23 @@ export function ChatWindow({
         .eq("id", message.id)
         .eq("sender_id", user.id);
       if (deleteError) {
+        console.error("[deleteMessage] Database error:", deleteError);
         setError(deleteError.message);
         return;
       }
 
+      console.log("[deleteMessage] Delete successful, updating local state");
+
       // reflect change locally
       setMessages((prev) =>
-        prev.map((item) => (item.id === message.id ? { ...item, content: "", deleted: true } : item))
+        prev.map((item) => {
+          if (item.id === message.id) {
+            const updated = { ...item, content: "", deleted: true };
+            console.log("[deleteMessage] Updated item in local state:", updated.id, "Deleted:", updated.deleted, "Type:", updated.type);
+            return updated;
+          }
+          return item;
+        })
       );
       if (replyTarget?.id === message.id) setReplyTarget(null);
       if (editingTarget?.id === message.id) {
@@ -1676,9 +1688,12 @@ export function ChatWindow({
                           ) : null}
 
                           {message.deleted ? (
-                            <p className="whitespace-pre-wrap break-words text-zinc-500 italic">
-                              Bir mesaj silindi
-                            </p>
+                            <>
+                              {console.log("[render] Drawing deleted message:", message.id, "Type was:", message.type)}
+                              <p className="whitespace-pre-wrap break-words text-zinc-500 italic">
+                                Bir mesaj silindi
+                              </p>
+                            </>
                           ) : message.type === "sticker" && message.sticker ? (
                             <div className="flex flex-col items-center">
                               <img
