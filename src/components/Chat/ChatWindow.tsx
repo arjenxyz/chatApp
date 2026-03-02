@@ -1671,7 +1671,11 @@ export function ChatWindow({
                             </button>
                           ) : null}
 
-                          {message.type === "sticker" && message.sticker ? (
+                          {message.deleted ? (
+                            <p className="whitespace-pre-wrap break-words text-zinc-500 italic">
+                              Bir mesaj silindi
+                            </p>
+                          ) : message.type === "sticker" && message.sticker ? (
                             <div className="flex flex-col items-center">
                               <img
                                 alt={message.sticker.name}
@@ -1697,7 +1701,7 @@ export function ChatWindow({
                             </div>
                           ) : (
                             <p className="whitespace-pre-wrap break-words">
-                              {message.deleted ? "Bir mesaj silindi" : renderLinkifiedText(message.content)}
+                              {renderLinkifiedText(message.content)}
                               {message.edited && !message.deleted ? (
                                 <span className="ml-1 text-[10px] text-zinc-400">(düzenlendi)</span>
                               ) : null}
