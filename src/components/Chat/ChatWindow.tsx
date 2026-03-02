@@ -580,6 +580,8 @@ export function ChatWindow({
       return;
     }
 
+    console.log("[block-refresh] Checking block status for otherUserId:", otherUserId);
+
     // Check if current user blocked the other user
     const { data: blockedByMe, error: errorByMe } = await supabase
       .from("user_blocks")
@@ -589,10 +591,11 @@ export function ChatWindow({
       .maybeSingle();
 
     if (errorByMe) {
-
+      console.warn("[block-refresh] Error checking blockedByMe:", errorByMe.message);
     }
 
     if (blockedByMe) {
+      console.log("[block-refresh] User is blockedByMe");
       setBlockStatus("blockedByMe");
       return;
     }
@@ -611,16 +614,20 @@ export function ChatWindow({
     }
 
     if (blockedByOther) {
+      console.log("[block-refresh] User is blockedByOther");
       setBlockStatus("blockedByOther");
       return;
     }
 
+    console.log("[block-refresh] Block status is none");
     setBlockStatus("none");
   }, [otherUserId, supabase, user]);
 
   const handleBlockToggle = useCallback(async () => {
     if (!user || !otherUserId) return;
     if (typeof window === "undefined") return;
+
+    console.log("[block] Attempting block toggle - user.id:", user.id, "otherUserId:", otherUserId);
 
     const isCurrentlyBlocked = blockStatus === "blockedByMe";
     const message = isCurrentlyBlocked
@@ -635,6 +642,7 @@ export function ChatWindow({
         .delete()
         .match({ blocker_id: user.id, blocked_id: otherUserId });
       if (error) {
+        console.error("[block] Delete error:", error);
         setError(error.message);
         return;
       }
@@ -642,10 +650,12 @@ export function ChatWindow({
       return;
     }
 
+    console.log("[block] Inserting block record with blocker_id:", user.id, "blocked_id:", otherUserId);
     const { error } = await supabase
       .from("user_blocks")
       .insert({ blocker_id: user.id, blocked_id: otherUserId });
     if (error) {
+      console.error("[block] Insert error:", error);
       setError(error.message);
       return;
     }
@@ -1264,33 +1274,29 @@ export function ChatWindow({
   useEffect(() => {
     if (!user) return;
 
+    // Subscribe to block changes - any INSERT/DELETE to user_blocks where user is involved
     const blockChannel = supabase
       .channel(`block-notif:${user.id}`)
       .on(
         "postgres_changes",
         {
-          event: "INSERT",
+          event: "*", // Listen to all events (INSERT, UPDATE, DELETE)
           schema: "public",
-          table: "user_blocks",
-          filter: `or(blocker_id.eq.${user.id},blocked_id.eq.${user.id})`
+          table: "user_blocks"
         },
-        () => {
-          void refreshBlockStatus();
+        (payload: { new: {blocker_id?: string; blocked_id?: string}; old: {blocker_id?: string; blocked_id?: string}; eventType: string }) => {
+          const change = payload.new || payload.old;
+          
+          // Only refresh if this change involves current user
+          if (change?.blocker_id === user.id || change?.blocked_id === user.id) {
+            console.log("[block-realtime] Block table changed:", payload.eventType, change);
+            void refreshBlockStatus();
+          }
         }
       )
-      .on(
-        "postgres_changes",
-        {
-          event: "DELETE",
-          schema: "public",
-          table: "user_blocks",
-          filter: `or(blocker_id.eq.${user.id},blocked_id.eq.${user.id})`
-        },
-        () => {
-          void refreshBlockStatus();
-        }
-      )
-      .subscribe();
+      .subscribe((status) => {
+        console.log("[block-realtime] subscription status:", status);
+      });
 
     return () => {
       void supabase.removeChannel(blockChannel);
