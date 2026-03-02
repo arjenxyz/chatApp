@@ -870,11 +870,20 @@ export function ChatWindow({
 
       setStickerDeleting(stickerId);
       try {
-        const { error } = await supabase.from("stickers").delete().eq("id", stickerId).eq("created_by", user.id);
-        if (error) throw error;
+        console.log("[sticker-delete] Deleting sticker:", stickerId, "User ID:", user.id);
+        // Remove the created_by filter - RLS will handle the authorization
+        const { data, error } = await supabase.from("stickers").delete().eq("id", stickerId).select();
+        console.log("[sticker-delete] Delete response data:", data);
+        console.log("[sticker-delete] Delete error:", error);
+        if (error) {
+          console.error("[sticker-delete] Database error details:", error);
+          throw error;
+        }
+        console.log("[sticker-delete] Delete successful, reloading stickers");
         await loadStickers();
       } catch (deleteError) {
         const message = deleteError instanceof Error ? deleteError.message : "Sticker silinemedi.";
+        console.error("[sticker-delete] Error details:", message, deleteError);
         setStickerUploadError(message);
       } finally {
         setStickerDeleting(null);
