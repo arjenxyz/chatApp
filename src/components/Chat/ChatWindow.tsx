@@ -305,6 +305,7 @@ export function ChatWindow({
   const [stickers, setStickers] = useState<MessageStickerRowRaw[]>([]);
   const [mediaPickerOpen, setMediaPickerOpen] = useState(false);
   const [selectedMediaTab, setSelectedMediaTab] = useState<"emoji" | "sticker" | "gif">("emoji");
+  const [hasUnreadMessages, setHasUnreadMessages] = useState(false);
   const [selectedEmojiCategory, setSelectedEmojiCategory] = useState(EMOJI_CATEGORIES[0]?.id ?? "people");
   const [attachmentFile, setAttachmentFile] = useState<File | null>(null);
   const [attachmentPreview, setAttachmentPreview] = useState<string | null>(null);
@@ -409,10 +410,10 @@ export function ChatWindow({
 
   const markRead = useCallback(async () => {
     if (!conversationId) return;
-    const { error: rpcError } = await supabase.rpc("mark_conversation_read", {
+    await supabase.rpc("mark_conversation_read", {
       p_conversation_id: conversationId
     });
-    if (rpcError) console.warn("[mark_conversation_read] failed:", rpcError.message);
+
   }, [conversationId, supabase]);
 
   const sendTypingStatus = useCallback(
@@ -420,7 +421,7 @@ export function ChatWindow({
       if (!typingChannelRef.current || !user || !conversationId) return;
 
       try {
-        const status = await typingChannelRef.current.send({
+        await typingChannelRef.current.send({
           type: "broadcast",
           event: "typing",
           payload: {
@@ -430,11 +431,7 @@ export function ChatWindow({
           }
         });
 
-        if (status !== "ok") {
-          console.warn("[typing] broadcast status:", status);
-        }
-      } catch (broadcastError) {
-        console.warn("[typing] broadcast failed:", broadcastError);
+      } catch {
       }
     },
     [conversationId, user]
@@ -449,7 +446,7 @@ export function ChatWindow({
       const accessToken = sessionData.session?.access_token;
       if (!accessToken) return;
 
-      const response = await fetch("/api/push/message", {
+      await fetch("/api/push/message", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -462,9 +459,7 @@ export function ChatWindow({
         keepalive: true
       });
 
-      if (!response.ok) {
-        console.warn("[push] notify api status:", response.status);
-      }
+
     },
     [conversationId, supabase.auth]
   );
@@ -502,7 +497,6 @@ export function ChatWindow({
 
     // If admin, load all pending stickers with creator info
     if (adminStatus) {
-      console.log("[loadStickers] Loading pending stickers for admin user");
       const { data: allPending } = await supabase
         .from("stickers")
         .select(`
@@ -518,7 +512,6 @@ export function ChatWindow({
         .order("created_at", { ascending: true });
       
       if (allPending) {
-        console.log("[loadStickers] Found pending stickers:", allPending.length);
         setAllPendingStickers(
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           allPending.map((s: any) => ({
@@ -527,7 +520,6 @@ export function ChatWindow({
           }))
         );
       } else {
-        console.log("[loadStickers] No pending stickers found");
         setAllPendingStickers([]);
       }
     } else {
@@ -594,8 +586,7 @@ export function ChatWindow({
       .maybeSingle();
 
     if (errorByMe) {
-      console.warn("[blocks] status failed:", errorByMe.message);
-      return;
+
     }
 
     if (blockedByMe) {
@@ -749,7 +740,6 @@ export function ChatWindow({
 
   const uploadMedia = useCallback(
     async (file: File) => {
-      console.log("[uploadMedia] Starting upload for file:", file.name, "size:", file.size);
       if (!conversationId || !user) throw new Error("Eksik bilgiler");
       const sanitizedName = encodeURIComponent(file.name.replace(/[^a-zA-Z0-9._-]/g, "_"));
       const path = `${conversationId}/${user.id}/${Date.now()}-${sanitizedName}`;
@@ -945,6 +935,11 @@ export function ChatWindow({
     void refreshBlockStatus();
   }, [conversationId, loadStickers, refreshBlockStatus, refreshNotificationSettings, user]);
 
+  const scrollToBottom = useCallback(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    setHasUnreadMessages(false);
+  }, []);
+
   useEffect(() => {
     if (!conversationId || !user) return;
 
@@ -1127,9 +1122,17 @@ export function ChatWindow({
           const withReply = await hydrateRealtimeReply(rawMessage);
           const nextMessage = normalizeMessage(withReply);
 
-          console.log("[realtime-insert] New message received:", nextMessage.id, "Replied to:", nextMessage.replied_to?.id, "Current reply target:", replyTarget?.id);
           setMessages((prev) => (prev.some((item) => item.id === nextMessage.id) ? prev : [...prev, nextMessage]));
           if (nextMessage.sender_id !== user.id) void markRead();
+          
+          // Handle auto-scroll: if user is near bottom, scroll automatically; otherwise show unread button
+          if (autoScrollRef.current && bottomRef.current) {
+            setTimeout(() => {
+              bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+            }, 0);
+          } else if (nextMessage.sender_id !== user.id) {
+            setHasUnreadMessages(true);
+          }
         }
       )
       .on(
@@ -1156,10 +1159,8 @@ export function ChatWindow({
           }
           
           const nextMessage = normalizeMessage(rawMessage);
-          console.log("[realtime-update] Message updated:", nextMessage.id, "Deleted:", nextMessage.deleted, "Current reply target:", replyTarget?.id);
           setMessages((prev) => prev.map((item) => (item.id === nextMessage.id ? { ...item, ...nextMessage } : item)));
           if (nextMessage.deleted) {
-            console.log("[realtime-update] Message is deleted, clearing reply if it's the target");
             setReplyTarget((prev) => (prev?.id === nextMessage.id ? null : prev));
             setEditingTarget((prev) => {
               if (prev?.id === nextMessage.id) {
@@ -1189,7 +1190,6 @@ export function ChatWindow({
             )
           );
 
-          console.log("[realtime-delete] Message deleted:", deleted.id, "Current reply target:", replyTarget?.id);
           setReplyTarget((prev) => (prev?.id === deleted.id ? null : prev));
           setEditingTarget((prev) => {
             if (prev?.id === deleted.id) {
@@ -1297,8 +1297,6 @@ export function ChatWindow({
       if (!user) return;
       if (message.sender_id !== user.id) return;
 
-      console.log("[deleteMessage] Deleting message:", message.id, "Type:", message.type, "Has sticker:", !!message.sticker, "Has mediaUrl:", !!message.mediaUrl);
-
       // mark message as deleted instead of removing it from the database
       const { error: deleteError } = await supabase
         .from("messages")
@@ -1306,23 +1304,13 @@ export function ChatWindow({
         .eq("id", message.id)
         .eq("sender_id", user.id);
       if (deleteError) {
-        console.error("[deleteMessage] Database error:", deleteError);
         setError(deleteError.message);
         return;
       }
 
-      console.log("[deleteMessage] Delete successful, updating local state");
-
       // reflect change locally
       setMessages((prev) =>
-        prev.map((item) => {
-          if (item.id === message.id) {
-            const updated = { ...item, content: "", deleted: true };
-            console.log("[deleteMessage] Updated item in local state:", updated.id, "Deleted:", updated.deleted, "Type:", updated.type);
-            return updated;
-          }
-          return item;
-        })
+        prev.map((item) => (item.id === message.id ? { ...item, content: "", deleted: true } : item))
       );
       if (replyTarget?.id === message.id) setReplyTarget(null);
       if (editingTarget?.id === message.id) {
@@ -1387,7 +1375,6 @@ export function ChatWindow({
   );
 
   const send = useCallback(async () => {
-    console.log("[send] Send called, trimmedText:", trimmedText, "attachmentFile:", !!attachmentFile);
     if (!user || !conversationId || (!trimmedText && !attachmentFile)) return;
     if (!networkOnline) {
       setError("Bağlantı yok. Mesaj gönderilemedi.");
@@ -1470,6 +1457,7 @@ export function ChatWindow({
       setText("");
       setReplyTarget(null);
       setActiveMessageId(null);
+      setHasUnreadMessages(false);
       setTimeout(focusInputWithoutScroll, 0);
     } finally {
       sendingRef.current = false;
@@ -1578,7 +1566,7 @@ export function ChatWindow({
 
       <div
         ref={scrollRef}
-        className="min-h-0 flex-1 overflow-y-auto px-3 py-4"
+        className="relative min-h-0 flex-1 overflow-y-auto px-3 py-4"
         onScroll={() => {
           const el = scrollRef.current;
           if (!el) return;
@@ -1745,10 +1733,7 @@ export function ChatWindow({
                         <div className={cn("mt-1 flex items-center gap-1 px-1", active ? "opacity-100" : "opacity-0 group-hover:opacity-100")}>
                           <button
                             className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900 text-zinc-300 hover:bg-zinc-800"
-                            onClick={() => {
-                              console.log("[reply-click] Setting reply target to message:", message.id, message.content);
-                              setReplyTarget(message);
-                            }}
+                            onClick={() => setReplyTarget(message)}
                             title="Yanıtla"
                             type="button"
                           >
@@ -1799,6 +1784,20 @@ export function ChatWindow({
           </ul>
         )}
         <div ref={bottomRef} />
+        {hasUnreadMessages ? (
+          <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-20">
+            <button
+              aria-label="Yeni mesajlara git"
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-zinc-800/90 text-sm text-zinc-100 border border-zinc-700/50 shadow-lg hover:bg-zinc-700/90 transition-colors"
+              onClick={scrollToBottom}
+              type="button"
+              title="Yeni mesaj var"
+            >
+              <div className="h-2 w-2 rounded-full bg-red-500 animate-pulse" />
+              <div>Yeni mesaj</div>
+            </button>
+          </div>
+        ) : null}
       </div>
 
       {replyTarget || editingTarget ? (
@@ -1806,13 +1805,9 @@ export function ChatWindow({
           <p className="truncate">
             {editingTarget ? `Düzenleniyor: ${editingTarget.content}` : `Yanıtlanıyor: ${replyTarget?.content ?? ""}`}
           </p>
-          {replyTarget && !editingTarget && (
-            <span className="ml-2 text-[10px] text-zinc-500">(ID: {replyTarget.id.slice(0, 8)})</span>
-          )}
           <button
             className="rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-zinc-300 hover:bg-zinc-800"
             onClick={() => {
-              console.log("[reply-clear] Clearing reply target");
               setReplyTarget(null);
               setEditingTarget(null);
               if (editingTarget) setText("");
