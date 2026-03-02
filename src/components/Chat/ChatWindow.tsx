@@ -3,6 +3,7 @@
 import {
   AlertCircle,
   ArrowLeft,
+  Ban,
   Bell,
   BellOff,
   Check,
@@ -12,7 +13,6 @@ import {
   Plus,
   Reply,
   SendHorizontal,
-  Shield,
   Sticker,
   Trash2,
   Upload,
@@ -1656,11 +1656,16 @@ export function ChatWindow({
           {otherUserId ? (
             <button
               aria-label={blockStatus === "blockedByMe" ? "Engellemeyi kaldır" : "Engelle"}
-              className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900/50 text-zinc-200 hover:bg-zinc-800"
+              className={cn(
+                "inline-flex h-9 items-center justify-center rounded-lg border px-2.5 transition-colors",
+                blockStatus === "blockedByMe"
+                  ? "border-orange-700/50 bg-orange-900/50 text-orange-300 hover:bg-orange-900/70"
+                  : "border-red-700/50 bg-red-900/50 text-red-300 hover:bg-red-900/70"
+              )}
               onClick={() => void handleBlockToggle()}
               type="button"
             >
-              <Shield className="h-4 w-4" />
+              <Ban className="h-4 w-4" />
             </button>
           ) : null}
         </div>
@@ -1927,16 +1932,16 @@ export function ChatWindow({
           <span>İnternet bağlantısı yok. Gönderme düğmesi bağlantı gelene kadar pasif.</span>
         </div>
       ) : blockStatus === "blockedByMe" ? (
-        <div className="border-t border-yellow-900/60 bg-yellow-950/40 px-4 py-3 flex flex-col gap-3">
+        <div className="border-t border-orange-900/60 bg-orange-950/40 px-4 py-3 flex flex-col gap-3">
           <div className="flex items-start gap-3">
-            <Shield className="h-5 w-5 text-yellow-300 shrink-0 mt-0.5" />
+            <Ban className="h-5 w-5 text-orange-300 shrink-0 mt-0.5" />
             <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium text-yellow-200">Bu kullanıcı engelli</p>
-              <p className="text-xs text-yellow-100/70 mt-1">Mesajlarını görmeyeceksin ve seni görmeyecek. Engeli istediğin zaman kaldırabilirsin.</p>
+              <p className="text-sm font-medium text-orange-200">Bu kullanıcıyı engelledi</p>
+              <p className="text-xs text-orange-100/70 mt-1">Mesajlarını görmeyeceksin ve sen de görmeyeceksin. Engeli istediğin zaman kaldırabilirsin.</p>
             </div>
           </div>
           <button
-            className="self-start inline-flex items-center gap-2 rounded-lg border border-yellow-700/50 bg-yellow-900/40 px-4 py-2 text-sm font-medium text-yellow-200 hover:bg-yellow-900/60 transition-colors"
+            className="self-start inline-flex items-center gap-2 rounded-lg border border-orange-700/50 bg-orange-900/40 px-4 py-2 text-sm font-medium text-orange-200 hover:bg-orange-900/60 transition-colors"
             onClick={() => void handleBlockToggle()}
             type="button"
           >
@@ -1947,7 +1952,7 @@ export function ChatWindow({
       ) : blockedByOther ? (
         <div className="border-t border-red-900/60 bg-red-950/40 px-4 py-3">
           <div className="flex items-start gap-3">
-            <AlertCircle className="h-5 w-5 text-red-300 shrink-0 mt-0.5" />
+            <Ban className="h-5 w-5 text-red-300 shrink-0 mt-0.5" />
             <div className="flex-1 min-w-0">
               <p className="text-sm font-medium text-red-200">Engellendi</p>
               <p className="text-xs text-red-100/70 mt-1">Bu kullanıcı seni engelledi. Mesaj gönderemez ve göremezsin.</p>
