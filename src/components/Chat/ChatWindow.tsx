@@ -324,6 +324,9 @@ export function ChatWindow({
     []
   );
   const [showModerationPanel, setShowModerationPanel] = useState(false);
+  const [gifSearchQuery, setGifSearchQuery] = useState("");
+  const [gifs, setGifs] = useState<Array<{ id: string; url: string; title: string; images: { fixed_height: { url: string } } }>>([]);
+  const [gifsLoading, setGifsLoading] = useState(false);
 
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -902,6 +905,45 @@ export function ChatWindow({
     }
   }, [mediaPickerOpen]);
 
+  const fetchGifs = useCallback(async (query: string) => {
+    if (!query.trim()) {
+      setGifs([]);
+      return;
+    }
+
+    setGifsLoading(true);
+    try {
+      const apiKey = process.env.NEXT_PUBLIC_GIPHY_API_KEY;
+      const response = await fetch(
+        `https://api.giphy.com/v1/gifs/search?q=${encodeURIComponent(query)}&limit=20&api_key=${apiKey}`
+      );
+      const data = await response.json();
+      setGifs(data.data || []);
+    } catch (error) {
+      console.error("[gif-search] Error:", error);
+      setGifs([]);
+    } finally {
+      setGifsLoading(false);
+    }
+  }, []);
+
+  const loadTrendingGifs = useCallback(async () => {
+    setGifsLoading(true);
+    try {
+      const apiKey = process.env.NEXT_PUBLIC_GIPHY_API_KEY;
+      const response = await fetch(
+        `https://api.giphy.com/v1/gifs/trending?limit=20&api_key=${apiKey}`
+      );
+      const data = await response.json();
+      setGifs(data.data || []);
+    } catch (error) {
+      console.error("[gif-trending] Error:", error);
+      setGifs([]);
+    } finally {
+      setGifsLoading(false);
+    }
+  }, []);
+
   const handleEmojiSelect = useCallback(
     (emoji: string) => {
       setText((prev) => prev + emoji);
@@ -1374,6 +1416,60 @@ export function ChatWindow({
     [blockedByOther, conversationId, notifyRecipientsForPush, supabase, user]
   );
 
+  const sendGifMessage = useCallback(
+    async (gifUrl: string, gifTitle: string) => {
+      if (!user || !conversationId) return;
+      if (blockedByOther) {
+        setError("Bu kullanıcı seni engelledi.");
+        return;
+      }
+      if (sendingRef.current) return;
+
+      sendingRef.current = true;
+      setSending(true);
+      setError(null);
+      autoScrollRef.current = true;
+
+      try {
+        const payload = {
+          conversation_id: conversationId,
+          sender_id: user.id,
+          content: gifTitle || "GIF",
+          type: "image" as const,
+          media_url: gifUrl
+        };
+
+        const { data: inserted, error: insertError } = await supabase
+          .from("messages")
+          .insert(payload)
+          .select(
+            "id, conversation_id, sender_id, content, type, replied_to(id, content, sender_id), created_at, is_read, deleted, edited, media_url, sticker_id, sticker:stickers(id, name, image_url, created_by)"
+          )
+          .single();
+        if (insertError) {
+          setError(insertError.message);
+          return;
+        }
+
+        if (inserted) {
+          const nextMessage = normalizeMessage(inserted as MessageRowRaw);
+          setMessages((prev) => (prev.some((item) => item.id === nextMessage.id) ? prev : [...prev, nextMessage]));
+          void notifyRecipientsForPush(nextMessage.id);
+        }
+
+        setReplyTarget(null);
+        setActiveMessageId(null);
+        setGifSearchQuery("");
+        setGifs([]);
+      } finally {
+        sendingRef.current = false;
+        setSending(false);
+        setMediaPickerOpen(false);
+      }
+    },
+    [blockedByOther, conversationId, notifyRecipientsForPush, supabase, user]
+  );
+
   const send = useCallback(async () => {
     if (!user || !conversationId || (!trimmedText && !attachmentFile)) return;
     if (!networkOnline) {
@@ -1535,8 +1631,8 @@ export function ChatWindow({
                     ? `${typingLabel}${typingDots}`
                     : otherUserId
                       ? isOnline(otherUserId)
-                        ? "aktif"
-                        : "çevrimdışı"
+                        ? "çevrim içi"
+                        : "çevrim dışı"
                       : "grup sohbeti"}
             </p>
           </div>
@@ -1970,9 +2066,11 @@ export function ChatWindow({
                 "rounded-lg px-3 py-1 text-sm",
                 selectedMediaTab === "gif" ? "bg-zinc-700 text-white" : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700"
               )}
-              onClick={() => setSelectedMediaTab("gif")}
+              onClick={() => {
+                setSelectedMediaTab("gif");
+                if (gifs.length === 0) void loadTrendingGifs();
+              }}
               type="button"
-              disabled
             >
               GIF
             </button>
@@ -2337,9 +2435,54 @@ export function ChatWindow({
                 )}
               </div>
             </>
+          ) : selectedMediaTab === "gif" ? (
+            <>
+              <div className="mb-3 flex gap-2">
+                <input
+                  className="flex-1 rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none placeholder:text-zinc-600 focus:border-zinc-600"
+                  onKeyUp={(e) => {
+                    const query = (e.currentTarget as HTMLInputElement).value;
+                    if (query.trim()) {
+                      void fetchGifs(query);
+                    }
+                  }}
+                  placeholder="GIF ara..."
+                  type="text"
+                  value={gifSearchQuery}
+                  onChange={(e) => setGifSearchQuery(e.target.value)}
+                />
+              </div>
+              {gifsLoading ? (
+                <div className="py-8 text-center text-sm text-zinc-500">Yükleniyor...</div>
+              ) : gifs.length === 0 ? (
+                <div className="py-8 text-center text-sm text-zinc-500">GIF bulunamadı. Trending GIF&apos;leri görmek için sekmeyi aç.</div>
+              ) : (
+                <div className="grid grid-cols-3 gap-2 max-h-64 overflow-y-auto">
+                  {gifs.map((gif) => (
+                    <button
+                      key={gif.id}
+                      className="relative overflow-hidden rounded-lg border border-zinc-700 bg-zinc-800 hover:border-blue-600 transition-colors group"
+                      onClick={() => void sendGifMessage(gif.images.fixed_height.url, gif.title)}
+                      title={gif.title}
+                      type="button"
+                    >
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        alt={gif.title}
+                        className="h-20 w-full object-cover"
+                        src={gif.images.fixed_height.url}
+                      />
+                      <div className="absolute inset-0 bg-black/0 group-hover:bg-black/40 transition-colors flex items-center justify-center">
+                        <span className="text-white opacity-0 group-hover:opacity-100 transition-opacity text-xs font-medium">Gönder</span>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </>
           ) : (
             <div className="py-8 text-center text-sm text-zinc-500">
-              GIF özelliği yakında eklenecek.
+              Bilinmeyen medya sekmesi.
             </div>
           )}
         </div>
