@@ -594,19 +594,19 @@ export function ChatWindow({
       .eq("blocked_id", user.id)
       .maybeSingle();
 
-    console.log("[block-refresh] Query 1 (blockedByOther - they blocked me):", { blockedByOther, errorByOther });
+    console.log("[block-refresh] Query 1 - blockedByOther (otherUserId blocked me):", { blockedByOther, errorByOther });
 
     if (errorByOther) {
       console.warn("[block-refresh] Error checking blockedByOther:", errorByOther.message);
     }
 
     if (blockedByOther) {
-      console.log("[block-refresh] ✅ Setting blockStatus to 'blockedByOther' (PRIORITY)");
+      console.log("[block-refresh] ✅ Result: Setting blockStatus to 'blockedByOther' (HIGHER PRIORITY)");
       setBlockStatus("blockedByOther");
       return;
     }
 
-    // Check if current user blocked the other user
+    // Check if current user blocked the other user (lower priority)
     const { data: blockedByMe, error: errorByMe } = await supabase
       .from("user_blocks")
       .select("blocker_id, blocked_id")
@@ -614,19 +614,19 @@ export function ChatWindow({
       .eq("blocked_id", otherUserId)
       .maybeSingle();
 
-    console.log("[block-refresh] Query 2 (blockedByMe - I blocked them):", { blockedByMe, errorByMe });
+    console.log("[block-refresh] Query 2 - blockedByMe (I blocked otherUserId):", { blockedByMe, errorByMe });
 
     if (errorByMe) {
       console.warn("[block-refresh] Error checking blockedByMe:", errorByMe.message);
     }
 
     if (blockedByMe) {
-      console.log("[block-refresh] ✅ Setting blockStatus to 'blockedByMe'");
+      console.log("[block-refresh] ✅ Result: Setting blockStatus to 'blockedByMe'");
       setBlockStatus("blockedByMe");
       return;
     }
 
-    console.log("[block-refresh] ✅ Setting blockStatus to 'none'");
+    console.log("[block-refresh] ✅ Result: Setting blockStatus to 'none'");
     setBlockStatus("none");
   }, [otherUserId, supabase, user]);
 
