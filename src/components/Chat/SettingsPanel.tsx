@@ -1,7 +1,7 @@
 "use client";
 
-import { Check, Copy, Loader2, LogOut, Save } from "lucide-react";
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { Check, Copy, ImagePlus, Loader2, LogOut, Save, X } from "lucide-react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { getSupabaseBrowserClient } from "@/lib/supabase/browser";
 import {
@@ -14,6 +14,9 @@ import { cn } from "@/lib/utils";
 import { useAuth } from "@/providers/AuthProvider";
 
 const USERNAME_REGEX = /^[a-z0-9_]{3,20}$/;
+const AVATAR_BUCKET = "chat-media";
+const MAX_AVATAR_SIZE = 5 * 1024 * 1024;
+const ALLOWED_AVATAR_MIME_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
 
 type ProfileForm = {
   username: string;
@@ -30,7 +33,9 @@ export function SettingsPanel() {
   const [savingProfile, setSavingProfile] = useState(false);
   const [profileError, setProfileError] = useState<string | null>(null);
   const [profileSuccess, setProfileSuccess] = useState<string | null>(null);
+  const [avatarUploading, setAvatarUploading] = useState(false);
   const [preferences, setPreferences] = useState<UserPreferences>(getDefaultUserPreferences());
+  const avatarInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     setForm({
@@ -62,6 +67,48 @@ export function SettingsPanel() {
       setPreferences(next);
     },
     [user]
+  );
+
+  const uploadAvatarFromFile = useCallback(
+    async (file: File) => {
+      if (!user) return;
+
+      setProfileError(null);
+      setProfileSuccess(null);
+
+      if (!ALLOWED_AVATAR_MIME_TYPES.includes(file.type)) {
+        setProfileError("Desteklenen avatar formatları: png, jpg, webp, gif.");
+        return;
+      }
+      if (file.size > MAX_AVATAR_SIZE) {
+        setProfileError("Avatar dosyası en fazla 5MB olabilir.");
+        return;
+      }
+
+      setAvatarUploading(true);
+      try {
+        const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
+        const path = `avatars/${user.id}/${Date.now()}-${safeName}`;
+
+        const { error: uploadError } = await supabase.storage.from(AVATAR_BUCKET).upload(path, file, {
+          cacheControl: "3600",
+          upsert: false
+        });
+
+        if (uploadError) {
+          setProfileError(uploadError.message);
+          return;
+        }
+
+        const { data } = supabase.storage.from(AVATAR_BUCKET).getPublicUrl(path);
+        const avatarUrl = data.publicUrl;
+        setForm((prev) => ({ ...prev, avatarUrl }));
+        setProfileSuccess("Avatar yüklendi. Değişikliği kaydetmeyi unutma.");
+      } finally {
+        setAvatarUploading(false);
+      }
+    },
+    [supabase, user]
   );
 
   const statusLabel = useMemo(() => {
@@ -136,6 +183,47 @@ export function SettingsPanel() {
               <p className="text-xs text-zinc-500">{statusLabel}</p>
             </div>
           </div>
+
+          <input
+            ref={avatarInputRef}
+            accept={ALLOWED_AVATAR_MIME_TYPES.join(",")}
+            className="hidden"
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              event.target.value = "";
+              if (!file) return;
+              void uploadAvatarFromFile(file);
+            }}
+            type="file"
+          />
+
+          <div className="mb-4 flex flex-wrap items-center gap-2">
+            <button
+              className={cn(
+                "inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors",
+                avatarUploading
+                  ? "border-zinc-700 bg-zinc-800 text-zinc-400"
+                  : "border-zinc-700 bg-zinc-900 text-zinc-200 hover:bg-zinc-800"
+              )}
+              disabled={avatarUploading}
+              onClick={() => avatarInputRef.current?.click()}
+              type="button"
+            >
+              {avatarUploading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ImagePlus className="h-3.5 w-3.5" />}
+              Avatar Yükle
+            </button>
+            {form.avatarUrl ? (
+              <button
+                className="inline-flex items-center gap-2 rounded-lg border border-red-800/70 bg-red-950/30 px-3 py-1.5 text-xs font-medium text-red-300 hover:bg-red-950/50"
+                onClick={() => setForm((prev) => ({ ...prev, avatarUrl: "" }))}
+                type="button"
+              >
+                <X className="h-3.5 w-3.5" />
+                Avatarı Kaldır
+              </button>
+            ) : null}
+          </div>
+          <p className="mb-4 text-[11px] text-zinc-500">Maksimum dosya boyutu 5MB. Desteklenen biçimler: PNG, JPG, WEBP, GIF.</p>
 
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="space-y-1">
