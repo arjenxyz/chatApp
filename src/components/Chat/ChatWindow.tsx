@@ -371,6 +371,7 @@ export function ChatWindow({
   const otherUserId = useMemo(() => {
     if (!conversation || conversation.is_group) return null;
     const other = participants.find((participant) => participant.user_id !== user?.id);
+    console.log("[otherId] conversation.is_group:", conversation?.is_group, "other:", other?.user_id);
     return other?.user_id ?? null;
   }, [conversation, participants, user?.id]);
 
@@ -576,6 +577,7 @@ export function ChatWindow({
 
   const refreshBlockStatus = useCallback(async () => {
     if (!user || !otherUserId) {
+      console.log("[block-refresh] EARLY RETURN - user:", !!user, "otherUserId:", otherUserId);
       setBlockStatus("none");
       return;
     }
@@ -583,6 +585,26 @@ export function ChatWindow({
     console.log("[block-refresh] ========== Starting check ==========");
     console.log("[block-refresh] Current user.id:", user.id);
     console.log("[block-refresh] otherUserId:", otherUserId);
+
+    // Check if other user blocked current user FIRST (higher priority)
+    const { data: blockedByOther, error: errorByOther } = await supabase
+      .from("user_blocks")
+      .select("blocker_id, blocked_id")
+      .eq("blocker_id", otherUserId)
+      .eq("blocked_id", user.id)
+      .maybeSingle();
+
+    console.log("[block-refresh] Query 1 (blockedByOther - they blocked me):", { blockedByOther, errorByOther });
+
+    if (errorByOther) {
+      console.warn("[block-refresh] Error checking blockedByOther:", errorByOther.message);
+    }
+
+    if (blockedByOther) {
+      console.log("[block-refresh] ✅ Setting blockStatus to 'blockedByOther' (PRIORITY)");
+      setBlockStatus("blockedByOther");
+      return;
+    }
 
     // Check if current user blocked the other user
     const { data: blockedByMe, error: errorByMe } = await supabase
@@ -592,7 +614,7 @@ export function ChatWindow({
       .eq("blocked_id", otherUserId)
       .maybeSingle();
 
-    console.log("[block-refresh] Query 1 (blockedByMe):", { blockedByMe, errorByMe });
+    console.log("[block-refresh] Query 2 (blockedByMe - I blocked them):", { blockedByMe, errorByMe });
 
     if (errorByMe) {
       console.warn("[block-refresh] Error checking blockedByMe:", errorByMe.message);
@@ -604,26 +626,6 @@ export function ChatWindow({
       return;
     }
 
-    // Check if other user blocked current user
-    const { data: blockedByOther, error: errorByOther } = await supabase
-      .from("user_blocks")
-      .select("blocker_id, blocked_id")
-      .eq("blocker_id", otherUserId)
-      .eq("blocked_id", user.id)
-      .maybeSingle();
-
-    console.log("[block-refresh] Query 2 (blockedByOther):", { blockedByOther, errorByOther });
-
-    if (errorByOther) {
-      console.warn("[block-refresh] Error checking blockedByOther:", errorByOther.message);
-    }
-
-    if (blockedByOther) {
-      console.log("[block-refresh] ✅ Setting blockStatus to 'blockedByOther'");
-      setBlockStatus("blockedByOther");
-      return;
-    }
-
     console.log("[block-refresh] ✅ Setting blockStatus to 'none'");
     setBlockStatus("none");
   }, [otherUserId, supabase, user]);
@@ -632,7 +634,7 @@ export function ChatWindow({
     if (!user || !otherUserId) return;
     if (typeof window === "undefined") return;
 
-    console.log("[block] Attempting block toggle - user.id:", user.id, "otherUserId:", otherUserId);
+    console.log("[block] Attempting block toggle - user.id:", user.id, "otherUserId:", otherUserId, "current blockStatus:", blockStatus);
 
     const isCurrentlyBlocked = blockStatus === "blockedByMe";
     const message = isCurrentlyBlocked
@@ -642,16 +644,28 @@ export function ChatWindow({
     if (!window.confirm(message)) return;
 
     if (isCurrentlyBlocked) {
-      const { error } = await supabase
+      console.log("[block] Deleting block: blocker_id =", user.id, "blocked_id =", otherUserId);
+      const { error, count } = await supabase
         .from("user_blocks")
         .delete()
-        .match({ blocker_id: user.id, blocked_id: otherUserId });
+        .eq("blocker_id", user.id)
+        .eq("blocked_id", otherUserId);
+      
       if (error) {
         console.error("[block] Delete error:", error);
         setError(error.message);
         return;
       }
+      
+      console.log("[block] Delete successful, deleted rows:", count);
       setBlockStatus("none");
+      return;
+    }
+
+    // Only allow INSERT if not already blocked by other user
+    if (blockStatus === "blockedByOther") {
+      setError("Bu kullanıcı seni engelledi. Onu engelleyemezsin.");
+      console.log("[block] Cannot block user who already blocked you");
       return;
     }
 
