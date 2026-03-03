@@ -302,6 +302,8 @@ export function ChatWindow({
   const [swipeState, setSwipeState] = useState<{ id: string; offset: number } | null>(null);
   const [muted, setMuted] = useState(false);
   const [blockStatus, setBlockStatus] = useState<"none" | "blockedByMe" | "blockedByOther">("none");
+  const [blockError, setBlockError] = useState<string | null>(null);
+  const blockErrorTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [stickers, setStickers] = useState<MessageStickerRowRaw[]>([]);
   const [mediaPickerOpen, setMediaPickerOpen] = useState(false);
   const [selectedMediaTab, setSelectedMediaTab] = useState<"emoji" | "sticker" | "gif">("emoji");
@@ -664,8 +666,18 @@ export function ChatWindow({
 
     // Only allow INSERT if not already blocked by other user
     if (blockStatus === "blockedByOther") {
-      setError("Bu kullanıcı seni engelledi. Onu engelleyemezsin.");
+      const errorMsg = "Bu kullanıcı seni engelledi. Onu engelleyemezsin.";
+      setBlockError(errorMsg);
       console.log("[block] Cannot block user who already blocked you");
+      
+      // Auto-dismiss error after 4 seconds
+      if (blockErrorTimeoutRef.current) {
+        clearTimeout(blockErrorTimeoutRef.current);
+      }
+      blockErrorTimeoutRef.current = setTimeout(() => {
+        setBlockError(null);
+        blockErrorTimeoutRef.current = null;
+      }, 4000);
       return;
     }
 
@@ -1285,6 +1297,10 @@ export function ChatWindow({
       typingSentAtRef.current = 0;
       typingTimers.forEach((timer) => clearTimeout(timer));
       typingTimers.clear();
+      if (blockErrorTimeoutRef.current) {
+        clearTimeout(blockErrorTimeoutRef.current);
+        blockErrorTimeoutRef.current = null;
+      }
       void supabase.removeChannel(channel);
     };
   }, [conversationId, markRead, supabase, user]);
@@ -1994,6 +2010,28 @@ export function ChatWindow({
               <p className="text-xs text-red-100/70 mt-1">Bu kullanıcı seni engelledi. Mesaj gönderemez ve göremezsin.</p>
             </div>
           </div>
+        </div>
+      ) : null}
+
+      {blockError ? (
+        <div className="border-t border-red-900/60 bg-red-950/40 px-4 py-3 flex items-start gap-3 animate-in fade-in duration-200">
+          <AlertCircle className="h-5 w-5 text-red-400 shrink-0 mt-0.5" />
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-medium text-red-200">{blockError}</p>
+          </div>
+          <button
+            onClick={() => {
+              setBlockError(null);
+              if (blockErrorTimeoutRef.current) {
+                clearTimeout(blockErrorTimeoutRef.current);
+                blockErrorTimeoutRef.current = null;
+              }
+            }}
+            type="button"
+            className="text-red-400 hover:text-red-300 shrink-0"
+          >
+            <X className="h-4 w-4" />
+          </button>
         </div>
       ) : null}
 
