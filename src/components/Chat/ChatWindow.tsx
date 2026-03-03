@@ -1303,6 +1303,23 @@ export function ChatWindow({
     };
   }, [user, refreshBlockStatus, supabase]);
 
+  // Polling mechanism for block status - ensures realtime updates even if subscription fails
+  useEffect(() => {
+    if (!user || !otherUserId) return;
+
+    console.log("[block-polling] Starting block status polling for otherUserId:", otherUserId);
+    
+    // Poll every 2 seconds
+    const pollInterval = setInterval(() => {
+      void refreshBlockStatus();
+    }, 2000);
+
+    return () => {
+      clearInterval(pollInterval);
+      console.log("[block-polling] Stopped polling");
+    };
+  }, [user, otherUserId, refreshBlockStatus]);
+
   // Separate useEffect for notification settings
   useEffect(() => {
     if (!user || !conversationId) return;
