@@ -1,9 +1,18 @@
 "use client";
 
-import { Loader2, MessageSquareText, Plus, RefreshCcw, Search } from "lucide-react";
+import { Loader2, MessageSquareText, Pin, PinOff, Plus, RefreshCcw, Search } from "lucide-react";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { usePresence } from "@/components/Presence/PresenceProvider";
+import {
+  buildConversationDraftStorageKey,
+  buildPinnedConversationsStorageKey,
+  CHAT_DRAFT_UPDATED_EVENT,
+  CHAT_PINNED_UPDATED_EVENT,
+  loadConversationDraft,
+  loadPinnedConversationIds,
+  togglePinnedConversationForUser
+} from "@/lib/chatPreferences";
 import { getSupabaseBrowserClient } from "@/lib/supabase/browser";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/providers/AuthProvider";
@@ -50,6 +59,15 @@ type ConversationItem = {
 };
 
 const USERNAME_REGEX = /^[a-z0-9_]{3,20}$/;
+const MAX_DRAFT_PREVIEW_LENGTH = 56;
+const BOT_MESSAGE_PREFIX = "[[BOT]]";
+
+function buildDraftPreviewText(value: string): string {
+  const compact = value.replace(/\s+/g, " ").trim();
+  if (!compact) return "";
+  if (compact.length <= MAX_DRAFT_PREVIEW_LENGTH) return compact;
+  return `${compact.slice(0, MAX_DRAFT_PREVIEW_LENGTH)}...`;
+}
 
 function buildPreviewText(message: Pick<LastMessageRow, "content" | "sender_id" | "deleted">, currentUserId: string): string {
   if (message.deleted) {
@@ -60,8 +78,11 @@ function buildPreviewText(message: Pick<LastMessageRow, "content" | "sender_id" 
     return "Mesaj yok";
   }
 
-  const prefix = message.sender_id === currentUserId ? "Sen: " : "";
-  const sliced = message.content.length > 60 ? `${message.content.slice(0, 60)}...` : message.content;
+  const normalizedContent = message.content.startsWith(BOT_MESSAGE_PREFIX)
+    ? message.content.slice(BOT_MESSAGE_PREFIX.length).trim()
+    : message.content;
+  const prefix = message.content.startsWith(BOT_MESSAGE_PREFIX) ? "Bot: " : message.sender_id === currentUserId ? "Sen: " : "";
+  const sliced = normalizedContent.length > 60 ? `${normalizedContent.slice(0, 60)}...` : normalizedContent;
   return `${prefix}${sliced}`;
 }
 
@@ -83,9 +104,13 @@ export function ConversationList({
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+  const [pinnedConversationIds, setPinnedConversationIds] = useState<string[]>([]);
+  const [conversationFilter, setConversationFilter] = useState<"all" | "pinned">("all");
+  const [draftVersion, setDraftVersion] = useState(0);
 
   const dmInputRef = useRef<HTMLInputElement | null>(null);
   const canCreate = Boolean(profile?.username);
+  const pinnedConversationSet = useMemo(() => new Set(pinnedConversationIds), [pinnedConversationIds]);
 
   const refresh = useCallback(async () => {
     if (!user) return;
@@ -205,6 +230,61 @@ export function ConversationList({
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    if (!user) {
+      setPinnedConversationIds([]);
+      return;
+    }
+
+    const syncPinned = () => {
+      setPinnedConversationIds(loadPinnedConversationIds(user.id));
+    };
+
+    syncPinned();
+
+    const onPinnedUpdated = () => {
+      syncPinned();
+    };
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === buildPinnedConversationsStorageKey(user.id)) {
+        syncPinned();
+      }
+    };
+
+    window.addEventListener(CHAT_PINNED_UPDATED_EVENT, onPinnedUpdated as EventListener);
+    window.addEventListener("storage", onStorage);
+
+    return () => {
+      window.removeEventListener(CHAT_PINNED_UPDATED_EVENT, onPinnedUpdated as EventListener);
+      window.removeEventListener("storage", onStorage);
+    };
+  }, [user]);
+
+  useEffect(() => {
+    if (!user) {
+      setDraftVersion((prev) => prev + 1);
+      return;
+    }
+
+    const draftKeyPrefix = buildConversationDraftStorageKey(user.id, "");
+    const onDraftUpdated = () => {
+      setDraftVersion((prev) => prev + 1);
+    };
+    const onStorage = (event: StorageEvent) => {
+      if (event.key && event.key.startsWith(draftKeyPrefix)) {
+        setDraftVersion((prev) => prev + 1);
+      }
+    };
+
+    window.addEventListener(CHAT_DRAFT_UPDATED_EVENT, onDraftUpdated as EventListener);
+    window.addEventListener("storage", onStorage);
+
+    return () => {
+      window.removeEventListener(CHAT_DRAFT_UPDATED_EVENT, onDraftUpdated as EventListener);
+      window.removeEventListener("storage", onStorage);
+    };
+  }, [user]);
 
   const patchLastMessageFromRealtime = useCallback(
     (message: {
@@ -356,22 +436,60 @@ export function ConversationList({
     };
   }, [refresh]);
 
+  const draftByConversation = useMemo(() => {
+    void draftVersion;
+    const result = new Map<string, string>();
+    if (!user) return result;
+
+    items.forEach((item) => {
+      const draft = loadConversationDraft(user.id, item.id);
+      if (draft.trim()) {
+        result.set(item.id, draft);
+      }
+    });
+
+    return result;
+  }, [draftVersion, items, user]);
+
   const filteredItems = useMemo(() => {
     const query = search.trim().toLowerCase();
-    if (!query) return items;
+    const searched = query
+      ? items.filter((item) => {
+          const draft = draftByConversation.get(item.id) ?? "";
+          return (
+            item.title.toLowerCase().includes(query) ||
+            item.subtitle.toLowerCase().includes(query) ||
+            (item.lastMessage ?? "").toLowerCase().includes(query) ||
+            draft.toLowerCase().includes(query)
+          );
+        })
+      : items;
 
-    return items.filter((item) => {
-      return (
-        item.title.toLowerCase().includes(query) ||
-        item.subtitle.toLowerCase().includes(query) ||
-        (item.lastMessage ?? "").toLowerCase().includes(query)
-      );
+    const filtered =
+      conversationFilter === "pinned"
+        ? searched.filter((item) => pinnedConversationSet.has(item.id))
+        : searched;
+
+    return [...filtered].sort((left, right) => {
+      const leftPinned = pinnedConversationSet.has(left.id);
+      const rightPinned = pinnedConversationSet.has(right.id);
+      if (leftPinned !== rightPinned) return leftPinned ? -1 : 1;
+      return new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime();
     });
-  }, [items, search]);
+  }, [conversationFilter, draftByConversation, items, pinnedConversationSet, search]);
 
   const selectedItem = useMemo(() => {
     return items.find((item) => item.id === selectedConversationId) ?? null;
   }, [items, selectedConversationId]);
+
+  const togglePinnedConversation = useCallback(
+    (conversationId: string) => {
+      if (!user) return;
+      const next = togglePinnedConversationForUser(user.id, conversationId);
+      setPinnedConversationIds(next);
+    },
+    [user]
+  );
 
   const createDirectConversation = useCallback(async () => {
     if (!user) return;
@@ -548,19 +666,47 @@ export function ConversationList({
       </div>
 
       <div className="flex items-center justify-between border-b border-zinc-800/70 px-3 py-2">
-        <p className="text-xs text-zinc-500">{filteredItems.length} konuşma</p>
-        <button
-          className={cn(
-            "inline-flex items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800",
-            loading && "opacity-60"
-          )}
-          disabled={loading}
-          onClick={() => void refresh()}
-          type="button"
-        >
-          <RefreshCcw className={cn("h-3.5 w-3.5", loading && "animate-spin")} />
-          Yenile
-        </button>
+        <p className="text-xs text-zinc-500">
+          {filteredItems.length} konuşma • {pinnedConversationIds.length} sabit
+        </p>
+        <div className="flex items-center gap-2">
+          <button
+            className={cn(
+              "rounded-lg border px-2 py-1 text-xs transition-colors",
+              conversationFilter === "all"
+                ? "border-zinc-700 bg-zinc-800 text-zinc-100"
+                : "border-zinc-800 bg-zinc-900 text-zinc-400 hover:bg-zinc-800"
+            )}
+            onClick={() => setConversationFilter("all")}
+            type="button"
+          >
+            Tümü
+          </button>
+          <button
+            className={cn(
+              "rounded-lg border px-2 py-1 text-xs transition-colors",
+              conversationFilter === "pinned"
+                ? "border-zinc-700 bg-zinc-800 text-zinc-100"
+                : "border-zinc-800 bg-zinc-900 text-zinc-400 hover:bg-zinc-800"
+            )}
+            onClick={() => setConversationFilter("pinned")}
+            type="button"
+          >
+            Pinli
+          </button>
+          <button
+            className={cn(
+              "inline-flex items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800",
+              loading && "opacity-60"
+            )}
+            disabled={loading}
+            onClick={() => void refresh()}
+            type="button"
+          >
+            <RefreshCcw className={cn("h-3.5 w-3.5", loading && "animate-spin")} />
+            Yenile
+          </button>
+        </div>
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto p-2">
@@ -571,60 +717,95 @@ export function ConversationList({
         ) : filteredItems.length === 0 ? (
           <div className="flex flex-col items-center gap-2 px-4 py-10 text-center">
             <MessageSquareText className="h-8 w-8 text-zinc-700" />
-            <p className="text-sm text-zinc-400">Henüz konuşma bulunamadı.</p>
-            <p className="text-xs text-zinc-500">Yeni DM başlatmak için yukarıdaki kutuyu kullan.</p>
+            <p className="text-sm text-zinc-400">
+              {conversationFilter === "pinned" ? "Pinli konuşma bulunamadı." : "Henüz konuşma bulunamadı."}
+            </p>
+            <p className="text-xs text-zinc-500">
+              {conversationFilter === "pinned"
+                ? "Bir konuşmayı sabitleyerek burada hızlı erişim sağlayabilirsin."
+                : "Yeni DM başlatmak için yukarıdaki kutuyu kullan."}
+            </p>
           </div>
         ) : (
           <ul className="space-y-1">
             {filteredItems.map((item) => {
               const selected = item.id === selectedConversationId;
               const online = item.otherUserId ? isOnline(item.otherUserId) : false;
+              const pinned = pinnedConversationSet.has(item.id);
+              const draft = draftByConversation.get(item.id) ?? "";
+              const subtitle = draft ? `Taslak: ${buildDraftPreviewText(draft)}` : item.lastMessage ?? item.subtitle;
 
               return (
                 <li key={item.id}>
-                  <button
-                    className={cn(
-                      "flex w-full items-center gap-3 rounded-xl border px-3 py-2.5 text-left transition-colors",
-                      selected
-                        ? "border-zinc-700 bg-zinc-900/90"
-                        : "border-transparent bg-zinc-900/30 hover:border-zinc-800 hover:bg-zinc-900/60"
-                    )}
-                    onClick={() => onSelectConversation(item.id)}
-                    type="button"
-                  >
-                    <div className="relative h-10 w-10 shrink-0">
-                      {item.avatarUrl ? (
-                        // eslint-disable-next-line @next/next/no-img-element
-                        <img
-                          alt={`${item.title} avatar`}
-                          className="h-10 w-10 rounded-full border border-zinc-800 object-cover"
-                          src={item.avatarUrl}
-                        />
-                      ) : (
-                        <div className="grid h-10 w-10 place-items-center rounded-full border border-zinc-800 bg-zinc-900 text-xs font-semibold text-zinc-200">
-                          {item.title.slice(0, 1).toUpperCase()}
-                        </div>
+                  <div className="group relative">
+                    <button
+                      className={cn(
+                        "flex w-full items-center gap-3 rounded-xl border px-3 py-2.5 pr-11 text-left transition-colors",
+                        selected
+                          ? "border-zinc-700 bg-zinc-900/90"
+                          : "border-transparent bg-zinc-900/30 hover:border-zinc-800 hover:bg-zinc-900/60"
                       )}
-                      {item.otherUserId && !item.isBlocked ? (
-                        <span
-                          aria-label={online ? "online" : "offline"}
-                          className={cn(
-                            "absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border border-zinc-950",
-                            online ? "bg-emerald-400" : "bg-zinc-600"
-                          )}
-                        />
-                      ) : null}
-                    </div>
+                      onClick={() => onSelectConversation(item.id)}
+                      type="button"
+                    >
+                      <div className="relative h-10 w-10 shrink-0">
+                        {item.avatarUrl ? (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img
+                            alt={`${item.title} avatar`}
+                            className="h-10 w-10 rounded-full border border-zinc-800 object-cover"
+                            src={item.avatarUrl}
+                          />
+                        ) : (
+                          <div className="grid h-10 w-10 place-items-center rounded-full border border-zinc-800 bg-zinc-900 text-xs font-semibold text-zinc-200">
+                            {item.title.slice(0, 1).toUpperCase()}
+                          </div>
+                        )}
+                        {item.otherUserId && !item.isBlocked ? (
+                          <span
+                            aria-label={online ? "online" : "offline"}
+                            className={cn(
+                              "absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border border-zinc-950",
+                              online ? "bg-emerald-400" : "bg-zinc-600"
+                            )}
+                          />
+                        ) : null}
+                      </div>
 
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate text-sm font-medium text-zinc-100">{item.title}</p>
-                      <p className="truncate text-xs text-zinc-500">{item.lastMessage ?? item.subtitle}</p>
-                    </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="flex items-center gap-1 truncate text-sm font-medium text-zinc-100">
+                          <span className="truncate">{item.title}</span>
+                          {pinned ? <Pin className="h-3.5 w-3.5 shrink-0 text-amber-300" /> : null}
+                        </p>
+                        <p className={cn("truncate text-xs", draft ? "text-amber-300" : "text-zinc-500")}>
+                          {subtitle}
+                        </p>
+                      </div>
 
-                    <span className="shrink-0 text-[10px] text-zinc-600">
-                      {new Date(item.createdAt).toLocaleDateString("tr-TR", { day: "2-digit", month: "2-digit" })}
-                    </span>
-                  </button>
+                      <span className="shrink-0 text-[10px] text-zinc-600">
+                        {new Date(item.createdAt).toLocaleDateString("tr-TR", { day: "2-digit", month: "2-digit" })}
+                      </span>
+                    </button>
+
+                    <button
+                      aria-label={pinned ? "Sabitleneni kaldır" : "Sohbeti sabitle"}
+                      className={cn(
+                        "absolute right-2 top-1/2 -translate-y-1/2 rounded-md border p-1.5 transition-colors",
+                        pinned
+                          ? "border-amber-700/50 bg-amber-600/20 text-amber-300 hover:bg-amber-600/30"
+                          : "border-zinc-700 bg-zinc-900/70 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200",
+                        !pinned && "opacity-0 group-hover:opacity-100"
+                      )}
+                      onClick={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        togglePinnedConversation(item.id);
+                      }}
+                      type="button"
+                    >
+                      {pinned ? <PinOff className="h-3.5 w-3.5" /> : <Pin className="h-3.5 w-3.5" />}
+                    </button>
+                  </div>
                 </li>
               );
             })}

@@ -6,10 +6,15 @@ import React, { useCallback, useEffect, useState } from "react";
 
 import { ChatWindow } from "@/components/Chat/ChatWindow";
 import { ConversationList } from "@/components/Chat/ConversationList";
+import { BottomTabNavigation } from "@/components/Chat/BottomTabNavigation";
+import { SettingsPanel } from "@/components/Chat/SettingsPanel";
+import { GroupsPanel } from "@/components/Chat/GroupsPanel";
 import { getSupabaseBrowserClient } from "@/lib/supabase/browser";
 import { useMediaQuery } from "@/lib/useMediaQuery";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/providers/AuthProvider";
+
+type Tab = "conversations" | "groups" | "settings";
 
 const USERNAME_REGEX = /^[a-z0-9_]{3,20}$/;
 
@@ -40,10 +45,10 @@ export function ChatShell() {
   const isMobile = useMediaQuery("(max-width: 767px)");
   const [mobileViewportHeight, setMobileViewportHeight] = useState<number | null>(null);
   const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
-  const [showConversationListOnMobile, setShowConversationListOnMobile] = useState(true);
   const [isPWA, setIsPWA] = useState(false);
   const [isNetworkOnline, setIsNetworkOnline] = useState(true);
   const [installPromptEvent, setInstallPromptEvent] = useState<BeforeInstallPromptEvent | null>(null);
+  const [activeTab, setActiveTab] = useState<Tab>("conversations");
 
   const [username, setUsername] = useState(profile?.username ?? "");
   const [savingUsername, setSavingUsername] = useState(false);
@@ -57,7 +62,7 @@ export function ChatShell() {
   const [pushPromptDismissed, setPushPromptDismissed] = useState(false);
 
   const vapidPublicKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
-  const deepLinkConversationId = searchParams.get("conversation");
+  const urlConversationId = searchParams.get("conversation");
 
   useEffect(() => {
     setUsername(profile?.username ?? "");
@@ -185,19 +190,6 @@ export function ChatShell() {
   }, [isMobile]);
 
   useEffect(() => {
-    if (!isMobile) return;
-    if (!selectedConversationId) setShowConversationListOnMobile(true);
-  }, [isMobile, selectedConversationId]);
-
-  useEffect(() => {
-    if (!deepLinkConversationId) return;
-    setSelectedConversationId(deepLinkConversationId);
-    if (isMobile) {
-      setShowConversationListOnMobile(false);
-    }
-  }, [deepLinkConversationId, isMobile]);
-
-  useEffect(() => {
     if (typeof window === "undefined") return;
     if (!isMobile && !isPWA) return;
 
@@ -211,6 +203,12 @@ export function ChatShell() {
       body.classList.remove("chat-shell-lock");
     };
   }, [isMobile, isPWA]);
+
+  useEffect(() => {
+    if (!urlConversationId) return;
+    setSelectedConversationId(urlConversationId);
+    setActiveTab("conversations");
+  }, [urlConversationId]);
 
   useEffect(() => {
     if ((!isMobile && !isPWA) || typeof window === "undefined") {
@@ -481,6 +479,8 @@ export function ChatShell() {
     user &&
     !pushPromptDismissed &&
     (pushPermission !== "granted" || !pushEnabled || Boolean(pushError));
+  const isMobileConversationView = isMobile && activeTab === "conversations" && Boolean(selectedConversationId);
+  const shouldShowMobileTabs = isMobile && !isMobileConversationView;
 
   const promptInstall = useCallback(async () => {
     if (!installPromptEvent) return;
@@ -607,7 +607,8 @@ export function ChatShell() {
       <section
         className={cn(
           "relative grid min-h-0 flex-1 grid-cols-1",
-          isPWA ? "gap-0" : "mt-3 gap-3 md:grid-cols-[320px,1fr]",
+          isPWA ? "gap-0 md:pb-0" : "mt-3 gap-3 md:pb-0 md:grid-cols-[320px,1fr]",
+          shouldShowMobileTabs ? "pb-[calc(4.25rem+env(safe-area-inset-bottom))]" : "pb-0",
           isPWA && !isMobile && "md:grid-cols-[320px,1fr]"
         )}
       >
@@ -657,45 +658,115 @@ export function ChatShell() {
           </section>
         ) : null}
 
-        <aside
-          className={cn(
-            "min-h-0",
-            isPWA ? "rounded-none border-0 bg-zinc-950" : "rounded-2xl border border-zinc-800 bg-zinc-900/45",
-            isMobile && !showConversationListOnMobile && selectedConversationId ? "hidden" : "block"
-          )}
-        >
-          <ConversationList
-            onSelectConversation={(conversationId) => {
+        {/* Desktop: Conversations */}
+        {!isMobile && activeTab === "conversations" && (
+          <>
+            <aside
+              className={cn(
+                "min-h-0",
+                isPWA ? "rounded-none border-0 bg-zinc-950" : "rounded-2xl border border-zinc-800 bg-zinc-900/45"
+              )}
+            >
+              <ConversationList
+                onSelectConversation={(conversationId) => {
+                  setSelectedConversationId(conversationId);
+                  syncConversationInUrl(conversationId);
+                }}
+                selectedConversationId={selectedConversationId}
+              />
+            </aside>
+
+            <section
+              className={cn(
+                "min-h-0",
+                isPWA ? "rounded-none border-0 bg-zinc-950" : "rounded-2xl border border-zinc-800 bg-zinc-900/45"
+              )}
+            >
+              <ChatWindow
+                conversationId={selectedConversationId}
+                networkOnline={isNetworkOnline}
+                onLeaveConversation={() => {
+                  setSelectedConversationId(null);
+                  syncConversationInUrl(null);
+                  setActiveTab("conversations");
+                }}
+              />
+            </section>
+          </>
+        )}
+
+        {!isMobile && activeTab === "groups" && (
+          <GroupsPanel
+            onOpenConversation={(conversationId) => {
               setSelectedConversationId(conversationId);
               syncConversationInUrl(conversationId);
-              if (isMobile) setShowConversationListOnMobile(false);
+              setActiveTab("conversations");
             }}
-            selectedConversationId={selectedConversationId}
           />
-        </aside>
+        )}
 
-        <section
-          className={cn(
-            "min-h-0",
-            isPWA ? "rounded-none border-0 bg-zinc-950" : "rounded-2xl border border-zinc-800 bg-zinc-900/45",
-            isMobile && showConversationListOnMobile ? "hidden" : "block"
-          )}
-        >
-          <ChatWindow
-            conversationId={selectedConversationId}
-            networkOnline={isNetworkOnline}
-            onBack={
-              isMobile
-                ? () => {
-                    setShowConversationListOnMobile(true);
+        {!isMobile && activeTab === "settings" && <SettingsPanel />}
+
+        {/* Mobile: Tab-based layout */}
+        {isMobile && (
+          <>
+            {activeTab === "conversations" && !selectedConversationId && (
+              <aside
+                className={cn(
+                  "min-h-0",
+                  isPWA ? "rounded-none border-0 bg-zinc-950" : "rounded-2xl border border-zinc-800 bg-zinc-900/45"
+                )}
+              >
+                <ConversationList
+                  onSelectConversation={(conversationId) => {
+                    setSelectedConversationId(conversationId);
+                    syncConversationInUrl(conversationId);
+                  }}
+                  selectedConversationId={selectedConversationId}
+                />
+              </aside>
+            )}
+
+            {activeTab === "conversations" && selectedConversationId && (
+              <section
+                className={cn(
+                  "min-h-0",
+                  isPWA ? "rounded-none border-0 bg-zinc-950" : "rounded-2xl border border-zinc-800 bg-zinc-900/45"
+                )}
+              >
+                <ChatWindow
+                  conversationId={selectedConversationId}
+                  networkOnline={isNetworkOnline}
+                  onBack={() => {
                     setSelectedConversationId(null);
                     syncConversationInUrl(null);
-                  }
-                : undefined
-            }
-          />
-        </section>
+                  }}
+                  onLeaveConversation={() => {
+                    setSelectedConversationId(null);
+                    syncConversationInUrl(null);
+                    setActiveTab("conversations");
+                  }}
+                />
+              </section>
+            )}
+
+            {activeTab === "groups" && (
+              <GroupsPanel
+                onOpenConversation={(conversationId) => {
+                  setSelectedConversationId(conversationId);
+                  syncConversationInUrl(conversationId);
+                  setActiveTab("conversations");
+                }}
+              />
+            )}
+
+            {activeTab === "settings" && <SettingsPanel />}
+          </>
+        )}
       </section>
+
+      {/* Bottom Tab Navigation (Mobile only) */}
+      <BottomTabNavigation activeTab={activeTab} mobileHidden={!shouldShowMobileTabs} onTabChange={setActiveTab} />
     </main>
   );
 }

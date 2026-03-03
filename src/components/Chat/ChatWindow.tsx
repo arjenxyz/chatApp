@@ -6,12 +6,22 @@ import {
   Ban,
   Bell,
   BellOff,
+  Bot,
+  Crown,
+  ChevronDown,
+  ChevronUp,
   Check,
   Copy,
+  Info,
   ImagePlus,
   Pencil,
+  Pin,
+  PinOff,
   Plus,
   Reply,
+  UserPlus,
+  Users,
+  Search,
   SendHorizontal,
   Sticker,
   Trash2,
@@ -22,6 +32,21 @@ import LinkifyIt from "linkify-it";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { usePresence } from "@/components/Presence/PresenceProvider";
+import {
+  buildPinnedConversationsStorageKey,
+  CHAT_PINNED_UPDATED_EVENT,
+  clearConversationDraft,
+  isConversationPinnedForUser,
+  loadConversationDraft,
+  saveConversationDraft,
+  togglePinnedConversationForUser
+} from "@/lib/chatPreferences";
+import {
+  getDefaultUserPreferences,
+  loadUserPreferences,
+  subscribeUserPreferences,
+  type UserPreferences
+} from "@/lib/userPreferences";
 import { getSupabaseBrowserClient } from "@/lib/supabase/browser";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/providers/AuthProvider";
@@ -30,6 +55,8 @@ type ConversationRow = {
   id: string;
   name: string | null;
   is_group: boolean;
+  owner_id: string | null;
+  created_at: string;
 };
 
 type ProfileRow = {
@@ -144,6 +171,28 @@ const ALLOWED_MEDIA_MIME_TYPES = [
   "image/svg+xml"
 ];
 const MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024;
+const USERNAME_REGEX = /^[a-z0-9_]{3,20}$/;
+const BOT_MESSAGE_PREFIX = "[[BOT]]";
+const BOT_SETTINGS_PREFIX = "chat.bot";
+const BOT_TRIGGER_REGEX =
+  /(^\/(help|yardim|yardım|bot|ai|ask|summary|ozet|özet|tasks?|todo|decisions?|agenda|standup|rewrite|translate|cevir|çevir|actionplan|plan)\b)|@bot\b/i;
+
+function buildBotEnabledStorageKey(userId: string, conversationId: string) {
+  return `${BOT_SETTINGS_PREFIX}.enabled.${userId}.${conversationId}`;
+}
+
+function buildBotAutoModeStorageKey(userId: string, conversationId: string) {
+  return `${BOT_SETTINGS_PREFIX}.auto.${userId}.${conversationId}`;
+}
+
+function isBotMessageContent(content: string): boolean {
+  return content.startsWith(BOT_MESSAGE_PREFIX);
+}
+
+function stripBotMarker(content: string): string {
+  if (!isBotMessageContent(content)) return content;
+  return content.slice(BOT_MESSAGE_PREFIX.length).trimStart();
+}
 
 const linkify = new LinkifyIt();
 const PHONE_REGEX = /\+?\d[\d\s\-]{6,}\d/g;
@@ -276,11 +325,13 @@ function formatDateLabel(dateIso: string): string {
 export function ChatWindow({
   conversationId,
   networkOnline = true,
-  onBack
+  onBack,
+  onLeaveConversation
 }: {
   conversationId: string | null;
   networkOnline?: boolean;
   onBack?: () => void;
+  onLeaveConversation?: () => void;
 }) {
   const supabase = getSupabaseBrowserClient();
   const { user } = useAuth();
@@ -329,6 +380,21 @@ export function ChatWindow({
   const [gifSearchQuery, setGifSearchQuery] = useState("");
   const [gifs, setGifs] = useState<Array<{ id: string; url: string; title: string; images: { fixed_height: { url: string } } }>>([]);
   const [gifsLoading, setGifsLoading] = useState(false);
+  const [messageSearchOpen, setMessageSearchOpen] = useState(false);
+  const [messageSearchQuery, setMessageSearchQuery] = useState("");
+  const [activeSearchMatchIndex, setActiveSearchMatchIndex] = useState(0);
+  const [isConversationPinned, setIsConversationPinned] = useState(false);
+  const [preferences, setPreferences] = useState<UserPreferences>(getDefaultUserPreferences());
+  const [botEnabled, setBotEnabled] = useState(false);
+  const [botAutoMode, setBotAutoMode] = useState(false);
+  const [botBusy, setBotBusy] = useState(false);
+  const [botError, setBotError] = useState<string | null>(null);
+  const [botPanelOpen, setBotPanelOpen] = useState(false);
+  const [groupInfoOpen, setGroupInfoOpen] = useState(false);
+  const [groupInviteUsername, setGroupInviteUsername] = useState("");
+  const [groupInviteBusy, setGroupInviteBusy] = useState(false);
+  const [groupInviteStatus, setGroupInviteStatus] = useState<string | null>(null);
+  const [groupLeaveBusy, setGroupLeaveBusy] = useState(false);
 
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -349,6 +415,7 @@ export function ChatWindow({
   } | null>(null);
   const attachmentInputRef = useRef<HTMLInputElement | null>(null);
   const stickerUploadInputRef = useRef<HTMLInputElement | null>(null);
+  const previousMessageCountRef = useRef(0);
 
   const trimmedText = text.trim();
   const blockedByOther = blockStatus === "blockedByOther";
@@ -384,6 +451,7 @@ export function ChatWindow({
   }, [conversation, participants, user?.id]);
 
   const typingLabel = useMemo(() => {
+    if (!preferences.showTypingIndicator) return null;
     if (typingUserIds.length === 0) return null;
 
     const names = typingUserIds
@@ -393,7 +461,40 @@ export function ChatWindow({
     if (names.length === 0) return "Birisi yazıyor";
     if (names.length === 1) return `${names[0]} yazıyor`;
     return `${names[0]} ve ${names.length - 1} kişi yazıyor`;
-  }, [participantsById, typingUserIds]);
+  }, [participantsById, preferences.showTypingIndicator, typingUserIds]);
+
+  const normalizedSearchQuery = messageSearchQuery.trim().toLocaleLowerCase("tr-TR");
+  const matchedMessageIds = useMemo(() => {
+    if (!normalizedSearchQuery) return [];
+
+    return messages
+      .filter((message) => {
+        if (message.deleted) return false;
+        return stripBotMarker(message.content).toLocaleLowerCase("tr-TR").includes(normalizedSearchQuery);
+      })
+      .map((message) => message.id);
+  }, [messages, normalizedSearchQuery]);
+
+  const matchedMessageIdSet = useMemo(() => new Set(matchedMessageIds), [matchedMessageIds]);
+  const activeSearchMessageId = matchedMessageIds[activeSearchMatchIndex] ?? null;
+  const isGroupConversation = Boolean(conversation?.is_group);
+  const groupMembers = useMemo(() => {
+    if (!isGroupConversation) return [];
+
+    const normalized = participants.map((participant) => ({
+      id: participant.user_id,
+      username: participant.profile?.username || participant.profile?.full_name || "Kullanıcı",
+      avatarUrl: participant.profile?.avatar_url ?? null,
+      isOwner: participant.user_id === conversation?.owner_id,
+      isMe: participant.user_id === user?.id
+    }));
+
+    return normalized.sort((left, right) => {
+      if (left.isOwner !== right.isOwner) return left.isOwner ? -1 : 1;
+      if (left.isMe !== right.isMe) return left.isMe ? -1 : 1;
+      return left.username.localeCompare(right.username, "tr-TR");
+    });
+  }, [conversation?.owner_id, isGroupConversation, participants, user?.id]);
 
   useEffect(() => {
     if (typingUserIds.length === 0) {
@@ -414,13 +515,155 @@ export function ChatWindow({
     };
   }, [typingUserIds.length]);
 
+  useEffect(() => {
+    setActiveSearchMatchIndex(0);
+  }, [conversationId, normalizedSearchQuery]);
+
+  useEffect(() => {
+    setMessageSearchOpen(false);
+    setMessageSearchQuery("");
+    setGroupInfoOpen(false);
+    setGroupInviteUsername("");
+    setGroupInviteStatus(null);
+  }, [conversationId]);
+
+  useEffect(() => {
+    if (activeSearchMatchIndex < matchedMessageIds.length) return;
+    setActiveSearchMatchIndex(0);
+  }, [activeSearchMatchIndex, matchedMessageIds.length]);
+
+  useEffect(() => {
+    if (!messageSearchOpen || !activeSearchMessageId) return;
+
+    const target = document.getElementById(`msg-${activeSearchMessageId}`);
+    target?.scrollIntoView({ behavior: "smooth", block: "center" });
+    setActiveMessageId(activeSearchMessageId);
+  }, [activeSearchMessageId, messageSearchOpen]);
+
+  useEffect(() => {
+    if (!user || !conversationId) {
+      setText("");
+      return;
+    }
+
+    setText(loadConversationDraft(user.id, conversationId));
+  }, [conversationId, user]);
+
+  useEffect(() => {
+    if (!user || !conversationId) return;
+    if (editingTarget) return;
+
+    saveConversationDraft(user.id, conversationId, text);
+  }, [conversationId, editingTarget, text, user]);
+
+  useEffect(() => {
+    if (!user || !conversationId) {
+      setIsConversationPinned(false);
+      return;
+    }
+
+    const syncPinnedState = () => {
+      setIsConversationPinned(isConversationPinnedForUser(user.id, conversationId));
+    };
+
+    syncPinnedState();
+
+    const onPinnedUpdated = () => {
+      syncPinnedState();
+    };
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === buildPinnedConversationsStorageKey(user.id)) {
+        syncPinnedState();
+      }
+    };
+
+    window.addEventListener(CHAT_PINNED_UPDATED_EVENT, onPinnedUpdated as EventListener);
+    window.addEventListener("storage", onStorage);
+
+    return () => {
+      window.removeEventListener(CHAT_PINNED_UPDATED_EVENT, onPinnedUpdated as EventListener);
+      window.removeEventListener("storage", onStorage);
+    };
+  }, [conversationId, user]);
+
+  useEffect(() => {
+    if (!user) {
+      setPreferences(getDefaultUserPreferences());
+      return;
+    }
+
+    setPreferences(loadUserPreferences(user.id));
+    return subscribeUserPreferences(user.id, setPreferences);
+  }, [user]);
+
+  useEffect(() => {
+    if (!user || !conversationId || !isGroupConversation || typeof window === "undefined") {
+      setBotEnabled(false);
+      setBotAutoMode(false);
+      setBotPanelOpen(false);
+      setBotError(null);
+      return;
+    }
+
+    const enabledKey = buildBotEnabledStorageKey(user.id, conversationId);
+    const autoModeKey = buildBotAutoModeStorageKey(user.id, conversationId);
+
+    const syncBotSettings = () => {
+      setBotEnabled(window.localStorage.getItem(enabledKey) === "1");
+      setBotAutoMode(window.localStorage.getItem(autoModeKey) === "1");
+    };
+
+    syncBotSettings();
+
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === enabledKey || event.key === autoModeKey) {
+        syncBotSettings();
+      }
+    };
+
+    window.addEventListener("storage", onStorage);
+    return () => {
+      window.removeEventListener("storage", onStorage);
+    };
+  }, [conversationId, isGroupConversation, user]);
+
+  useEffect(() => {
+    const lastMessage = messages[messages.length - 1];
+    const previousCount = previousMessageCountRef.current;
+    previousMessageCountRef.current = messages.length;
+
+    if (!preferences.soundNotifications || !lastMessage || messages.length <= previousCount) return;
+    if (lastMessage.sender_id === user?.id) return;
+    if (isBotMessageContent(lastMessage.content)) return;
+    if (typeof window === "undefined") return;
+
+    try {
+      const audioContext = new window.AudioContext();
+      const oscillator = audioContext.createOscillator();
+      const gain = audioContext.createGain();
+      oscillator.type = "sine";
+      oscillator.frequency.value = 880;
+      gain.gain.value = 0.03;
+      oscillator.connect(gain);
+      gain.connect(audioContext.destination);
+      oscillator.start();
+      oscillator.stop(audioContext.currentTime + 0.08);
+      oscillator.onended = () => {
+        void audioContext.close();
+      };
+    } catch {
+      // no-op
+    }
+  }, [messages, preferences.soundNotifications, user?.id]);
+
   const markRead = useCallback(async () => {
     if (!conversationId) return;
+    if (!preferences.sendReadReceipts) return;
     await supabase.rpc("mark_conversation_read", {
       p_conversation_id: conversationId
     });
 
-  }, [conversationId, supabase]);
+  }, [conversationId, preferences.sendReadReceipts, supabase]);
 
   const sendTypingStatus = useCallback(
     async (isTyping: boolean) => {
@@ -1023,8 +1266,246 @@ export function ChatWindow({
     setHasUnreadMessages(false);
   }, []);
 
+  const jumpSearchMatch = useCallback(
+    (direction: -1 | 1) => {
+      if (matchedMessageIds.length === 0) return;
+
+      setActiveSearchMatchIndex((prev) => {
+        const size = matchedMessageIds.length;
+        return (prev + direction + size) % size;
+      });
+    },
+    [matchedMessageIds.length]
+  );
+
+  const togglePinnedConversation = useCallback(() => {
+    if (!user || !conversationId) return;
+    const nextPinnedIds = togglePinnedConversationForUser(user.id, conversationId);
+    setIsConversationPinned(nextPinnedIds.includes(conversationId));
+  }, [conversationId, user]);
+
+  const inviteMemberToGroup = useCallback(async () => {
+    if (!user || !conversationId || !isGroupConversation) return;
+
+    const targetUsername = groupInviteUsername.trim().toLowerCase();
+    setGroupInviteStatus(null);
+
+    if (!targetUsername) {
+      setGroupInviteStatus("Kullanıcı adı gerekli.");
+      return;
+    }
+    if (!USERNAME_REGEX.test(targetUsername)) {
+      setGroupInviteStatus("Geçersiz kullanıcı adı formatı.");
+      return;
+    }
+
+    setGroupInviteBusy(true);
+    try {
+      const { data: profileData, error: profileError } = await supabase
+        .from("profiles")
+        .select("id, username, full_name, avatar_url, status")
+        .eq("username", targetUsername)
+        .maybeSingle();
+
+      if (profileError) {
+        setGroupInviteStatus(profileError.message);
+        return;
+      }
+      if (!profileData) {
+        setGroupInviteStatus("Kullanıcı bulunamadı.");
+        return;
+      }
+      if (participants.some((participant) => participant.user_id === profileData.id)) {
+        setGroupInviteStatus("Bu kullanıcı zaten grupta.");
+        return;
+      }
+
+      const { error: insertError } = await supabase.from("participants").insert({
+        conversation_id: conversationId,
+        user_id: profileData.id
+      });
+
+      if (insertError) {
+        setGroupInviteStatus(insertError.message);
+        return;
+      }
+
+      setParticipants((prev) => [
+        ...prev,
+        {
+          user_id: profileData.id,
+          profile: profileData as ProfileRow
+        }
+      ]);
+      setGroupInviteUsername("");
+      setGroupInviteStatus(`@${targetUsername} gruba eklendi.`);
+    } finally {
+      setGroupInviteBusy(false);
+    }
+  }, [conversationId, groupInviteUsername, isGroupConversation, participants, supabase, user]);
+
+  const leaveGroup = useCallback(async () => {
+    if (!user || !conversationId || !isGroupConversation) return;
+    if (typeof window !== "undefined") {
+      const confirmed = window.confirm("Bu gruptan ayrılmak istediğine emin misin?");
+      if (!confirmed) return;
+    }
+
+    setGroupLeaveBusy(true);
+    setGroupInviteStatus(null);
+    try {
+      const { error: leaveError } = await supabase
+        .from("participants")
+        .delete()
+        .eq("conversation_id", conversationId)
+        .eq("user_id", user.id);
+
+      if (leaveError) {
+        setGroupInviteStatus(leaveError.message);
+        return;
+      }
+
+      onLeaveConversation?.();
+    } finally {
+      setGroupLeaveBusy(false);
+    }
+  }, [conversationId, isGroupConversation, onLeaveConversation, supabase, user]);
+
+  const persistBotEnabled = useCallback(
+    (enabled: boolean) => {
+      if (!user || !conversationId || typeof window === "undefined") return;
+      const key = buildBotEnabledStorageKey(user.id, conversationId);
+      if (enabled) window.localStorage.setItem(key, "1");
+      else window.localStorage.removeItem(key);
+      setBotEnabled(enabled);
+      if (!enabled) {
+        setBotAutoMode(false);
+        window.localStorage.removeItem(buildBotAutoModeStorageKey(user.id, conversationId));
+      }
+      setBotError(null);
+    },
+    [conversationId, user]
+  );
+
+  const persistBotAutoMode = useCallback(
+    (enabled: boolean) => {
+      if (!user || !conversationId || typeof window === "undefined") return;
+      const key = buildBotAutoModeStorageKey(user.id, conversationId);
+      if (enabled) window.localStorage.setItem(key, "1");
+      else window.localStorage.removeItem(key);
+      setBotAutoMode(enabled);
+      if (enabled) setBotEnabled(true);
+    },
+    [conversationId, user]
+  );
+
+  const resolveBotPrompt = useCallback(
+    (value: string): string | null => {
+      const raw = value.trim();
+      if (!raw) return null;
+      if (botAutoMode) return raw;
+      if (!BOT_TRIGGER_REGEX.test(raw)) return null;
+      return raw;
+    },
+    [botAutoMode]
+  );
+
+  const requestBotReply = useCallback(
+    async (prompt: string, repliedToMessageId?: string) => {
+      if (!user || !conversationId || !isGroupConversation) return;
+
+      setBotBusy(true);
+      setBotError(null);
+
+      try {
+        const { data: sessionData } = await supabase.auth.getSession();
+        const accessToken = sessionData.session?.access_token;
+        if (!accessToken) {
+          setBotError("Bot için oturum doğrulaması alınamadı.");
+          return;
+        }
+
+        const recentMessages = messages
+          .filter((item) => !item.deleted)
+          .slice(-18)
+          .map((item) => ({
+            senderName:
+              isBotMessageContent(item.content)
+                ? "bot"
+                : participantsById.get(item.sender_id)?.profile?.username ||
+                  participantsById.get(item.sender_id)?.profile?.full_name ||
+                  "kullanici",
+            content: stripBotMarker(item.content)
+          }));
+
+        const response = await fetch("/api/bot/reply", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${accessToken}`
+          },
+          body: JSON.stringify({
+            conversationId,
+            prompt,
+            messages: recentMessages
+          })
+        });
+
+        const data = (await response.json()) as { reply?: string; error?: string };
+        if (!response.ok) {
+          throw new Error(data.error || "Bot yanıtı alınamadı.");
+        }
+
+        const answer = data.reply?.trim();
+        if (!answer) {
+          throw new Error("Bot boş yanıt döndürdü.");
+        }
+
+        const botPayload = {
+          conversation_id: conversationId,
+          sender_id: user.id,
+          content: `${BOT_MESSAGE_PREFIX}${answer}`,
+          type: "text" as const,
+          replied_to: repliedToMessageId
+        };
+
+        const { data: insertedBotMessage, error: botInsertError } = await supabase
+          .from("messages")
+          .insert(botPayload)
+          .select(
+            "id, conversation_id, sender_id, content, type, replied_to(id, content, sender_id), created_at, is_read, deleted, edited, media_url, sticker_id, sticker:stickers(id, name, image_url, created_by)"
+          )
+          .single();
+
+        if (botInsertError) {
+          throw new Error(botInsertError.message);
+        }
+
+        if (insertedBotMessage) {
+          const nextBotMessage = normalizeMessage(insertedBotMessage as MessageRowRaw);
+          setMessages((prev) => (prev.some((item) => item.id === nextBotMessage.id) ? prev : [...prev, nextBotMessage]));
+          void notifyRecipientsForPush(nextBotMessage.id);
+        }
+      } catch (botRequestError) {
+        setBotError(botRequestError instanceof Error ? botRequestError.message : "Bot yanıtında hata oluştu.");
+      } finally {
+        setBotBusy(false);
+      }
+    },
+    [conversationId, isGroupConversation, messages, notifyRecipientsForPush, participantsById, supabase, user]
+  );
+
   useEffect(() => {
     if (!conversationId || !user) return;
+
+    if (!preferences.showTypingIndicator) {
+      if (typingSentRef.current) {
+        typingSentRef.current = false;
+        typingSentAtRef.current = Date.now();
+        void sendTypingStatus(false);
+      }
+      return;
+    }
 
     if (!trimmedText) {
       if (typingSentRef.current) {
@@ -1052,7 +1533,7 @@ export function ChatWindow({
     return () => {
       clearTimeout(idleTimer);
     };
-  }, [conversationId, sendTypingStatus, trimmedText, user]);
+  }, [conversationId, preferences.showTypingIndicator, sendTypingStatus, trimmedText, user]);
 
   useEffect(() => {
     if (!user || !conversationId) {
@@ -1113,7 +1594,7 @@ export function ChatWindow({
         { data: participantData, error: participantError },
         { data: messageData, error: messageError }
       ] = await Promise.all([
-        supabase.from("conversations").select("id, name, is_group").eq("id", conversationId).single(),
+        supabase.from("conversations").select("id, name, is_group, owner_id, created_at").eq("id", conversationId).single(),
         supabase
           .from("participants")
           .select("user_id, profile:profiles(id, username, full_name, avatar_url, status)")
@@ -1396,6 +1877,7 @@ export function ChatWindow({
     async (message: MessageRow) => {
       if (!user) return;
       if (message.sender_id !== user.id) return;
+      if (isBotMessageContent(message.content)) return;
 
       // mark message as deleted instead of removing it from the database
       const { error: deleteError } = await supabase
@@ -1543,6 +2025,11 @@ export function ChatWindow({
 
     try {
       if (editingTarget) {
+        if (isBotMessageContent(editingTarget.content)) {
+          setEditingTarget(null);
+          setText("");
+          return;
+        }
         const { error: updateError } = await supabase
           .from("messages")
           .update({ content: trimmedText, edited: true })
@@ -1600,6 +2087,11 @@ export function ChatWindow({
         void notifyRecipientsForPush(nextMessage.id).catch((pushError) => {
           console.warn("[push] notify failed:", pushError);
         });
+
+        const botPrompt = botEnabled && isGroupConversation ? resolveBotPrompt(trimmedText) : null;
+        if (botPrompt) {
+          void requestBotReply(botPrompt, nextMessage.id);
+        }
       }
 
       if (typingSentRef.current) {
@@ -1609,6 +2101,7 @@ export function ChatWindow({
       }
 
       setText("");
+      clearConversationDraft(user.id, conversationId);
       setReplyTarget(null);
       setActiveMessageId(null);
       setHasUnreadMessages(false);
@@ -1624,13 +2117,17 @@ export function ChatWindow({
     notifyRecipientsForPush,
     replyTarget,
     sendTypingStatus,
+    botEnabled,
     supabase,
     trimmedText,
     user,
     networkOnline,
     attachmentFile,
     clearAttachment,
-    uploadMedia
+    uploadMedia,
+    isGroupConversation,
+    requestBotReply,
+    resolveBotPrompt
   ]);
 
   if (!conversationId) {
@@ -1691,12 +2188,81 @@ export function ChatWindow({
                       ? isOnline(otherUserId)
                         ? "çevrim içi"
                         : "çevrim dışı"
-                      : "grup sohbeti"}
+                      : botBusy
+                        ? "bot düşünüyor..."
+                        : botEnabled
+                          ? "grup sohbeti • bot aktif"
+                          : "grup sohbeti"}
             </p>
           </div>
         </div>
 
         <div className="flex items-center gap-2">
+          {isGroupConversation ? (
+            <button
+              aria-label={groupInfoOpen ? "Grup bilgisini kapat" : "Grup bilgisi"}
+              className={cn(
+                "inline-flex h-8 w-8 items-center justify-center rounded-lg border transition-colors",
+                groupInfoOpen
+                  ? "border-cyan-700/60 bg-cyan-600/20 text-cyan-300 hover:bg-cyan-600/30"
+                  : "border-zinc-800 bg-zinc-900/50 text-zinc-200 hover:bg-zinc-800"
+              )}
+              onClick={() => setGroupInfoOpen((prev) => !prev)}
+              type="button"
+            >
+              <Info className="h-4 w-4" />
+            </button>
+          ) : null}
+          <button
+            aria-label={messageSearchOpen ? "Mesaj aramayı kapat" : "Mesajlarda ara"}
+            className={cn(
+              "inline-flex h-8 w-8 items-center justify-center rounded-lg border transition-colors",
+              messageSearchOpen
+                ? "border-emerald-700/60 bg-emerald-600/20 text-emerald-300 hover:bg-emerald-600/30"
+                : "border-zinc-800 bg-zinc-900/50 text-zinc-200 hover:bg-zinc-800"
+            )}
+            onClick={() => {
+              setMessageSearchOpen((prev) => {
+                if (prev) {
+                  setMessageSearchQuery("");
+                  setActiveSearchMatchIndex(0);
+                  setActiveMessageId(null);
+                }
+                return !prev;
+              });
+            }}
+            type="button"
+          >
+            <Search className="h-4 w-4" />
+          </button>
+          <button
+            aria-label={isConversationPinned ? "Sabitleneni kaldır" : "Sohbeti sabitle"}
+            className={cn(
+              "inline-flex h-8 w-8 items-center justify-center rounded-lg border transition-colors",
+              isConversationPinned
+                ? "border-amber-700/60 bg-amber-600/20 text-amber-300 hover:bg-amber-600/30"
+                : "border-zinc-800 bg-zinc-900/50 text-zinc-200 hover:bg-zinc-800"
+            )}
+            onClick={togglePinnedConversation}
+            type="button"
+          >
+            {isConversationPinned ? <PinOff className="h-4 w-4" /> : <Pin className="h-4 w-4" />}
+          </button>
+          {isGroupConversation ? (
+            <button
+              aria-label={botPanelOpen ? "Bot panelini kapat" : "Bot panelini aç"}
+              className={cn(
+                "inline-flex h-8 w-8 items-center justify-center rounded-lg border transition-colors",
+                botEnabled
+                  ? "border-cyan-700/60 bg-cyan-600/20 text-cyan-300 hover:bg-cyan-600/30"
+                  : "border-zinc-800 bg-zinc-900/50 text-zinc-200 hover:bg-zinc-800"
+              )}
+              onClick={() => setBotPanelOpen((prev) => !prev)}
+              type="button"
+            >
+              <Bot className="h-4 w-4" />
+            </button>
+          ) : null}
           <button
             aria-label={muted ? "Bildirimleri aç" : "Bildirimleri sustur"}
             className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900/50 text-zinc-200 hover:bg-zinc-800"
@@ -1723,6 +2289,210 @@ export function ChatWindow({
         </div>
       </header>
 
+      {groupInfoOpen && isGroupConversation ? (
+        <section className="border-b border-cyan-900/40 bg-zinc-950/70 px-3 py-3">
+          <div className="rounded-xl border border-cyan-900/30 bg-cyan-950/10 p-3">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="truncate text-sm font-semibold text-cyan-100">{conversation?.name || "Grup Sohbeti"}</p>
+                <p className="mt-1 text-xs text-cyan-100/70">
+                  {groupMembers.length} üye
+                  {conversation?.created_at ? ` • ${new Date(conversation.created_at).toLocaleDateString("tr-TR")} tarihinde oluşturuldu` : ""}
+                </p>
+              </div>
+              <button
+                className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-300 hover:bg-zinc-800"
+                onClick={() => setGroupInfoOpen(false)}
+                type="button"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+
+            <div className="mt-3">
+              <p className="mb-2 text-xs font-semibold text-cyan-200">Grup Üyeleri</p>
+              <ul className="max-h-52 space-y-1 overflow-y-auto rounded-lg border border-zinc-800 bg-zinc-900/60 p-2">
+                {groupMembers.map((member) => (
+                  <li key={member.id} className="flex items-center justify-between rounded-md px-2 py-1.5">
+                    <div className="flex min-w-0 items-center gap-2">
+                      {member.avatarUrl ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img
+                          alt={member.username}
+                          className="h-7 w-7 rounded-full border border-zinc-700 object-cover"
+                          src={member.avatarUrl}
+                        />
+                      ) : (
+                        <div className="grid h-7 w-7 place-items-center rounded-full border border-zinc-700 bg-zinc-800 text-[11px] font-semibold text-zinc-200">
+                          {member.username.slice(0, 1).toUpperCase()}
+                        </div>
+                      )}
+                      <div className="min-w-0">
+                        <p className="truncate text-xs text-zinc-200">{member.username}</p>
+                        <p className="text-[11px] text-zinc-500">{isOnline(member.id) ? "çevrim içi" : "çevrim dışı"}</p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      {member.isOwner ? (
+                        <span className="inline-flex items-center gap-1 rounded-full border border-amber-700/60 bg-amber-600/20 px-2 py-0.5 text-[10px] text-amber-300">
+                          <Crown className="h-3 w-3" />
+                          Yönetici
+                        </span>
+                      ) : null}
+                      {member.isMe ? (
+                        <span className="rounded-full border border-zinc-700 bg-zinc-800 px-2 py-0.5 text-[10px] text-zinc-400">Sen</span>
+                      ) : null}
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </div>
+
+            <div className="mt-3 rounded-lg border border-zinc-800 bg-zinc-900/60 p-2">
+              <p className="mb-2 text-xs font-semibold text-zinc-300">Üye Ekle</p>
+              <div className="flex gap-2">
+                <input
+                  className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-xs text-zinc-100 outline-none placeholder:text-zinc-500 focus:border-zinc-600"
+                  onChange={(event) => setGroupInviteUsername(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
+                    event.preventDefault();
+                    void inviteMemberToGroup();
+                  }}
+                  placeholder="Kullanıcı adı"
+                  value={groupInviteUsername}
+                />
+                <button
+                  className={cn(
+                    "inline-flex items-center gap-1 rounded-lg border px-3 py-2 text-xs transition-colors",
+                    groupInviteBusy
+                      ? "border-zinc-700 bg-zinc-800 text-zinc-400"
+                      : "border-blue-700/60 bg-blue-600/30 text-blue-200 hover:bg-blue-600/40"
+                  )}
+                  disabled={groupInviteBusy}
+                  onClick={() => void inviteMemberToGroup()}
+                  type="button"
+                >
+                  <UserPlus className="h-3.5 w-3.5" />
+                  Ekle
+                </button>
+              </div>
+              {groupInviteStatus ? <p className="mt-2 text-[11px] text-zinc-400">{groupInviteStatus}</p> : null}
+            </div>
+
+            <div className="mt-3 flex items-center justify-between rounded-lg border border-red-900/50 bg-red-950/20 p-2">
+              <p className="text-xs text-red-200">Bu gruptan çıkmak istersen ayrılabilirsin.</p>
+              <button
+                className={cn(
+                  "inline-flex items-center gap-1 rounded-lg border px-3 py-1.5 text-xs transition-colors",
+                  groupLeaveBusy
+                    ? "border-zinc-700 bg-zinc-800 text-zinc-400"
+                    : "border-red-700/60 bg-red-600/20 text-red-200 hover:bg-red-600/30"
+                )}
+                disabled={groupLeaveBusy}
+                onClick={() => void leaveGroup()}
+                type="button"
+              >
+                {groupLeaveBusy ? <Check className="h-3.5 w-3.5" /> : <Users className="h-3.5 w-3.5" />}
+                Gruptan Ayrıl
+              </button>
+            </div>
+          </div>
+        </section>
+      ) : null}
+
+      {botPanelOpen && isGroupConversation ? (
+        <section className="border-b border-cyan-900/30 bg-cyan-950/20 px-3 py-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              className={cn(
+                "rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors",
+                botEnabled
+                  ? "border-cyan-700/60 bg-cyan-600/30 text-cyan-200 hover:bg-cyan-600/40"
+                  : "border-zinc-700 bg-zinc-900 text-zinc-300 hover:bg-zinc-800"
+              )}
+              onClick={() => persistBotEnabled(!botEnabled)}
+              type="button"
+            >
+              {botEnabled ? "Bot Açık" : "Bot Kapalı"}
+            </button>
+            <button
+              className={cn(
+                "rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors",
+                botAutoMode
+                  ? "border-emerald-700/60 bg-emerald-600/30 text-emerald-200 hover:bg-emerald-600/40"
+                  : "border-zinc-700 bg-zinc-900 text-zinc-300 hover:bg-zinc-800"
+              )}
+              disabled={!botEnabled}
+              onClick={() => persistBotAutoMode(!botAutoMode)}
+              type="button"
+            >
+              {botAutoMode ? "Oto Mod Açık" : "Oto Mod Kapalı"}
+            </button>
+            <span className="text-[11px] text-cyan-100/80">
+              Komutlar: <code>/help</code>, <code>/summary</code>, <code>/tasks</code>, <code>/decisions</code>, <code>/agenda</code>, <code>/standup</code>, <code>/rewrite</code>, <code>/translate</code>, <code>/actionplan</code>, <code>@bot</code>
+            </span>
+          </div>
+          {botError ? <p className="mt-2 text-xs text-red-300">{botError}</p> : null}
+          {botBusy ? <p className="mt-2 text-xs text-cyan-200">Bot yanıt hazırlıyor...</p> : null}
+        </section>
+      ) : null}
+
+      {messageSearchOpen ? (
+        <section className="border-b border-zinc-800/70 bg-zinc-900/50 px-3 py-2">
+          <div className="flex items-center gap-2">
+            <div className="relative flex-1">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-500" />
+              <input
+                className="w-full rounded-lg border border-zinc-700 bg-zinc-900 py-2 pl-8 pr-3 text-xs text-zinc-100 outline-none placeholder:text-zinc-500 focus:border-zinc-600"
+                onChange={(event) => setMessageSearchQuery(event.target.value)}
+                placeholder="Mesaj içinde ara..."
+                value={messageSearchQuery}
+              />
+            </div>
+
+            <div className="flex items-center gap-1 text-[11px] text-zinc-400">
+              {matchedMessageIds.length > 0 ? `${activeSearchMatchIndex + 1}/${matchedMessageIds.length}` : "0/0"}
+            </div>
+
+            <button
+              aria-label="Önceki eşleşme"
+              className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+              disabled={matchedMessageIds.length === 0}
+              onClick={() => jumpSearchMatch(-1)}
+              type="button"
+            >
+              <ChevronUp className="h-3.5 w-3.5" />
+            </button>
+            <button
+              aria-label="Sonraki eşleşme"
+              className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+              disabled={matchedMessageIds.length === 0}
+              onClick={() => jumpSearchMatch(1)}
+              type="button"
+            >
+              <ChevronDown className="h-3.5 w-3.5" />
+            </button>
+            <button
+              aria-label="Aramayı kapat"
+              className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-300 hover:bg-zinc-800"
+              onClick={() => {
+                setMessageSearchOpen(false);
+                setMessageSearchQuery("");
+                setActiveSearchMatchIndex(0);
+                setActiveMessageId(null);
+              }}
+              type="button"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+          {messageSearchQuery.trim() && matchedMessageIds.length === 0 ? (
+            <p className="mt-2 text-[11px] text-zinc-500">Eşleşme bulunamadı.</p>
+          ) : null}
+        </section>
+      ) : null}
+
       <div
         ref={scrollRef}
         className="relative min-h-0 flex-1 overflow-y-auto px-3 py-4"
@@ -1741,9 +2511,13 @@ export function ChatWindow({
         ) : (
           <ul className="space-y-3">
             {messages.map((message, index) => {
-              const mine = message.sender_id === user?.id;
+              const botMessage = isBotMessageContent(message.content);
+              const mine = !botMessage && message.sender_id === user?.id;
               const sender = participantsById.get(message.sender_id);
-              const senderName = sender?.profile?.username || sender?.profile?.full_name || "Kullanıcı";
+              const senderName = botMessage
+                ? "Atlas Bot"
+                : sender?.profile?.username || sender?.profile?.full_name || "Kullanıcı";
+              const displayContent = stripBotMarker(message.content);
               const showDateSeparator =
                 index === 0 ||
                 new Date(messages[index - 1].created_at).toDateString() !== new Date(message.created_at).toDateString();
@@ -1752,6 +2526,8 @@ export function ChatWindow({
               const swipeActive = swipeOffset !== 0;
               const swipeReady = !mine ? swipeOffset >= 46 : swipeOffset <= -46;
               const swipeAllowed = !message.deleted;
+              const searchMatched = matchedMessageIdSet.has(message.id);
+              const searchFocused = activeSearchMessageId === message.id;
 
               return (
                 <li key={message.id}>
@@ -1791,10 +2567,14 @@ export function ChatWindow({
                               ? "border-zinc-700 bg-zinc-800/60 text-zinc-400 italic"
                               : (message.type === "image" || message.type === "sticker")
                               ? "border-transparent bg-transparent text-zinc-100"
+                              : botMessage
+                              ? "border-cyan-900/50 bg-cyan-600/15 text-cyan-100"
                               : mine
                               ? "border-blue-900/60 bg-blue-600/85 text-white"
                               : "border-zinc-800 bg-zinc-900/70 text-zinc-100",
                             active && "ring-1 ring-zinc-500",
+                            searchMatched && !searchFocused && "ring-1 ring-emerald-600/70",
+                            searchFocused && "ring-2 ring-emerald-400",
                             swipeActive ? "transition-none" : "transition-transform duration-150 ease-out"
                           )}
                           onClick={() => setActiveMessageId((prev) => (prev === message.id ? null : message.id))}
@@ -1825,12 +2605,14 @@ export function ChatWindow({
                               type="button"
                             >
                               <span className="font-semibold">
-                                {message.replied_to.sender_id === user?.id
+                                {isBotMessageContent(message.replied_to.content)
+                                  ? "Atlas Bot"
+                                  : message.replied_to.sender_id === user?.id
                                   ? "Sen"
                                   : participantsById.get(message.replied_to.sender_id)?.profile?.username || "Kullanıcı"}
                                 :
                               </span>{" "}
-                              {message.replied_to.content}
+                              {stripBotMarker(message.replied_to.content)}
                             </button>
                           ) : null}
 
@@ -1864,7 +2646,7 @@ export function ChatWindow({
                             </div>
                           ) : (
                             <p className="whitespace-pre-wrap break-words">
-                              {renderLinkifiedText(message.content)}
+                              {renderLinkifiedText(displayContent)}
                               {message.edited && !message.deleted ? (
                                 <span className="ml-1 text-[10px] text-zinc-400">(düzenlendi)</span>
                               ) : null}
@@ -1874,7 +2656,7 @@ export function ChatWindow({
                           <div
                             className={cn(
                               "mt-1 flex items-center justify-end gap-2 text-[10px]",
-                              mine ? "text-blue-100/80" : "text-zinc-500"
+                              mine ? "text-blue-100/80" : botMessage ? "text-cyan-200/70" : "text-zinc-500"
                             )}
                           >
                             <span>
@@ -1883,7 +2665,7 @@ export function ChatWindow({
                                 minute: "2-digit"
                               })}
                             </span>
-                            {mine ? <span>{message.is_read ? "okundu" : "gönderildi"}</span> : null}
+                            {mine && !botMessage ? <span>{message.is_read ? "okundu" : "gönderildi"}</span> : null}
                           </div>
                         </div>
                       </div>
@@ -1901,20 +2683,20 @@ export function ChatWindow({
                           <button
                             className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900 text-zinc-300 hover:bg-zinc-800"
                             onClick={() => {
-                              if (navigator.clipboard?.writeText) void navigator.clipboard.writeText(message.content);
+                              if (navigator.clipboard?.writeText) void navigator.clipboard.writeText(displayContent);
                             }}
                             title="Kopyala"
                             type="button"
                           >
                             <Copy className="h-3.5 w-3.5" />
                           </button>
-                          {mine ? (
+                          {mine && !botMessage ? (
                             <button
                               className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900 text-zinc-300 hover:bg-zinc-800"
                               onClick={() => {
                                 setEditingTarget(message);
                                 setReplyTarget(null);
-                                setText(message.content);
+                                setText(displayContent);
                                 setTimeout(focusInputWithoutScroll, 0);
                               }}
                               title="Düzenle"
@@ -1923,7 +2705,7 @@ export function ChatWindow({
                               <Pencil className="h-3.5 w-3.5" />
                             </button>
                           ) : null}
-                          {mine ? (
+                          {mine && !botMessage ? (
                             <button
                               className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-red-900/60 bg-red-950/40 text-red-300 hover:bg-red-900/40"
                               onClick={() => void deleteMessage(message)}
@@ -1962,7 +2744,9 @@ export function ChatWindow({
       {replyTarget || editingTarget ? (
         <div className="flex items-center justify-between border-t border-zinc-800/80 bg-zinc-900/40 px-3 py-2 text-xs text-zinc-300">
           <p className="truncate">
-            {editingTarget ? `Düzenleniyor: ${editingTarget.content}` : `Yanıtlanıyor: ${replyTarget?.content ?? ""}`}
+            {editingTarget
+              ? `Düzenleniyor: ${stripBotMarker(editingTarget.content)}`
+              : `Yanıtlanıyor: ${stripBotMarker(replyTarget?.content ?? "")}`}
           </p>
           <button
             className="rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-zinc-300 hover:bg-zinc-800"
@@ -2098,13 +2882,22 @@ export function ChatWindow({
           disabled={sending || blockedByOther || blockStatus === "blockedByMe"}
           onChange={(event) => setText(event.target.value)}
           onKeyDown={(event) => {
+            if (event.nativeEvent.isComposing) return;
+
+            if (!preferences.enterToSend) {
+              if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+                event.preventDefault();
+                void send();
+              }
+              return;
+            }
+
             if (event.key !== "Enter") return;
             if (event.shiftKey) return;
-            if (event.nativeEvent.isComposing) return;
             event.preventDefault();
             void send();
           }}
-          placeholder="Mesaj yaz..."
+          placeholder={preferences.enterToSend ? "Mesaj yaz..." : "Mesaj yaz... (göndermek için Ctrl+Enter)"}
           rows={1}
           value={text}
         />
