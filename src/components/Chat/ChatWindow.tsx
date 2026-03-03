@@ -580,7 +580,9 @@ export function ChatWindow({
       return;
     }
 
-    console.log("[block-refresh] Checking block status for otherUserId:", otherUserId);
+    console.log("[block-refresh] ========== Starting check ==========");
+    console.log("[block-refresh] Current user.id:", user.id);
+    console.log("[block-refresh] otherUserId:", otherUserId);
 
     // Check if current user blocked the other user
     const { data: blockedByMe, error: errorByMe } = await supabase
@@ -590,12 +592,14 @@ export function ChatWindow({
       .eq("blocked_id", otherUserId)
       .maybeSingle();
 
+    console.log("[block-refresh] Query 1 (blockedByMe):", { blockedByMe, errorByMe });
+
     if (errorByMe) {
       console.warn("[block-refresh] Error checking blockedByMe:", errorByMe.message);
     }
 
     if (blockedByMe) {
-      console.log("[block-refresh] User is blockedByMe");
+      console.log("[block-refresh] ✅ Setting blockStatus to 'blockedByMe'");
       setBlockStatus("blockedByMe");
       return;
     }
@@ -608,18 +612,19 @@ export function ChatWindow({
       .eq("blocked_id", user.id)
       .maybeSingle();
 
+    console.log("[block-refresh] Query 2 (blockedByOther):", { blockedByOther, errorByOther });
+
     if (errorByOther) {
-      console.warn("[blocks] status failed:", errorByOther.message);
-      return;
+      console.warn("[block-refresh] Error checking blockedByOther:", errorByOther.message);
     }
 
     if (blockedByOther) {
-      console.log("[block-refresh] User is blockedByOther");
+      console.log("[block-refresh] ✅ Setting blockStatus to 'blockedByOther'");
       setBlockStatus("blockedByOther");
       return;
     }
 
-    console.log("[block-refresh] Block status is none");
+    console.log("[block-refresh] ✅ Setting blockStatus to 'none'");
     setBlockStatus("none");
   }, [otherUserId, supabase, user]);
 
