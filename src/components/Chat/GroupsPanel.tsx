@@ -169,6 +169,86 @@ export function GroupsPanel({
     void refreshGroups();
   }, [refreshGroups]);
 
+  useEffect(() => {
+    if (!user) return;
+
+    const channel = supabase
+      .channel(`groups-panel:${user.id}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "participants",
+          filter: `user_id=eq.${user.id}`
+        },
+        () => {
+          void refreshGroups();
+        }
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "DELETE",
+          schema: "public",
+          table: "participants",
+          filter: `user_id=eq.${user.id}`
+        },
+        () => {
+          void refreshGroups();
+        }
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "conversations"
+        },
+        () => {
+          void refreshGroups();
+        }
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "conversations"
+        },
+        () => {
+          void refreshGroups();
+        }
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "messages"
+        },
+        () => {
+          void refreshGroups();
+        }
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "messages"
+        },
+        () => {
+          void refreshGroups();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+  }, [refreshGroups, supabase, user]);
+
   const normalizedCreateMembers = useMemo(() => {
     return Array.from(
       new Set(

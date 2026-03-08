@@ -55,12 +55,9 @@ import {
 import {
   buildWatchPartyDisplayText,
   encodeWatchPartyEvent,
-  encodeWatchPartyPrompt,
   extractYouTubeVideosFromText,
   fetchYouTubeVideoMeta,
-  loadWatchPartyLinkMode,
   parseWatchPartyBotPayload,
-  saveWatchPartyLinkMode,
   type WatchPartyEventPayload
 } from "@/lib/watchParty";
 import { getSupabaseBrowserClient } from "@/lib/supabase/browser";
@@ -382,6 +379,7 @@ export function ChatWindow({
   conversationId,
   networkOnline = true,
   canInlineInstall = false,
+  watchPartyMode = false,
   onInlineInstall,
   onBack,
   onLeaveConversation
@@ -389,6 +387,7 @@ export function ChatWindow({
   conversationId: string | null;
   networkOnline?: boolean;
   canInlineInstall?: boolean;
+  watchPartyMode?: boolean;
   onInlineInstall?: (conversationId: string) => Promise<void> | void;
   onBack?: () => void;
   onLeaveConversation?: () => void;
@@ -1627,7 +1626,7 @@ export function ChatWindow({
   );
 
   const submitWatchPartyPromptDecision = useCallback(
-    async (message: MessageRow, decision: "queue_add" | "queue_skip" | "never") => {
+    async (message: MessageRow, decision: "queue_add" | "queue_skip") => {
       if (!user || !conversationId) return;
       if (!isGroupOwner) {
         setError("Watch Party ortak kontrolleri sadece oda sahibi tarafından yönetilebilir.");
@@ -1647,13 +1646,8 @@ export function ChatWindow({
         actorId: user.id,
         actorName,
         createdAt: new Date().toISOString(),
-        reason: decision === "never" ? "never_auto_prompt" : undefined,
         video: parsed.payload.video
       };
-
-      if (decision === "never") {
-        saveWatchPartyLinkMode(user.id, conversationId, "never");
-      }
 
       try {
         await insertBotMessage(encodeWatchPartyEvent(eventPayload), message.id, setError);
@@ -2310,9 +2304,6 @@ export function ChatWindow({
       const foundVideos = extractYouTubeVideosFromText(sourceText);
       if (foundVideos.length === 0) return;
 
-      const mode = loadWatchPartyLinkMode(user.id, conversationId);
-      if (mode === "never") return;
-
       const proposedByName =
         user.user_metadata?.username || user.user_metadata?.full_name || user.email || "Kullanıcı";
 
@@ -2320,30 +2311,16 @@ export function ChatWindow({
         const video = await fetchYouTubeVideoMeta(foundVideo.videoId, foundVideo.sourceUrl);
         const suggestionId = `${sourceMessageId}:${video.videoId}`;
 
-        if (mode === "always_queue") {
-          const queueEvent: WatchPartyEventPayload = {
-            schema: "watch_party_event_v1",
-            action: "queue_add",
-            suggestionId,
-            actorId: user.id,
-            actorName: proposedByName,
-            createdAt: new Date().toISOString(),
-            video
-          };
-          await insertBotMessage(encodeWatchPartyEvent(queueEvent), sourceMessageId);
-          continue;
-        }
-
-        const promptPayload = {
-          schema: "watch_party_prompt_v1" as const,
+        const queueEvent: WatchPartyEventPayload = {
+          schema: "watch_party_event_v1",
+          action: "queue_add",
           suggestionId,
-          sourceMessageId,
-          proposedById: user.id,
-          proposedByName,
-          proposedAt: new Date().toISOString(),
+          actorId: user.id,
+          actorName: proposedByName,
+          createdAt: new Date().toISOString(),
           video
         };
-        await insertBotMessage(encodeWatchPartyPrompt(promptPayload), sourceMessageId);
+        await insertBotMessage(encodeWatchPartyEvent(queueEvent), sourceMessageId);
       }
     },
     [conversationId, insertBotMessage, isGroupConversation, isGroupOwner, user]
@@ -2947,7 +2924,7 @@ export function ChatWindow({
           <p className="px-2 py-8 text-center text-sm text-zinc-500">Henüz mesaj yok.</p>
         ) : (
           <ul className="space-y-3">
-            {messages.map((message, index) => {
+            {(messages as MessageRow[]).map((message, index) => {
               const botMessage = isBotMessageContent(message.content);
               const mine = !botMessage && message.sender_id === user?.id;
               const sender = participantsById.get(message.sender_id);
@@ -2970,7 +2947,8 @@ export function ChatWindow({
                 index === 0 ||
                 new Date(messages[index - 1].created_at).toDateString() !== new Date(message.created_at).toDateString();
               const active = activeMessageId === message.id;
-              const swipeOffset = swipeState?.id === message.id ? swipeState.offset : 0;
+              const currentSwipe = swipeState;
+              const swipeOffset = currentSwipe?.id === message.id ? (currentSwipe.offset ?? 0) : 0;
               const swipeActive = swipeOffset !== 0;
               const swipeReady = !mine ? swipeOffset >= 46 : swipeOffset <= -46;
               const swipeAllowed = !message.deleted;
@@ -3129,13 +3107,6 @@ export function ChatWindow({
                                     type="button"
                                   >
                                     Hayır
-                                  </button>
-                                  <button
-                                    className="inline-flex items-center rounded-lg border border-amber-700/60 bg-amber-600/20 px-2 py-1 text-[11px] font-semibold text-amber-200 hover:bg-amber-600/30"
-                                    onClick={() => void submitWatchPartyPromptDecision(message, "never")}
-                                    type="button"
-                                  >
-                                    Bir daha sorma
                                   </button>
                                 </div>
                               )}
@@ -3369,30 +3340,43 @@ export function ChatWindow({
           onChange={handleAttachmentChange}
           type="file"
         />
-        <button
-          aria-label="Resim ekle"
-          className={cn(
-            "inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900 text-zinc-300 hover:bg-zinc-800",
-            (blockedByOther || blockStatus === "blockedByMe") && "opacity-60 cursor-not-allowed"
-          )}
-          disabled={blockedByOther || blockStatus === "blockedByMe"}
-          onClick={() => attachmentInputRef.current?.click()}
-          type="button"
-        >
-          <ImagePlus className="h-4 w-4" />
-        </button>
-        <button
-          aria-label="Emoji ve Sticker"
-          className={cn(
-            "inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900 text-zinc-300 hover:bg-zinc-800",
-            (blockedByOther || blockStatus === "blockedByMe") && "opacity-60 cursor-not-allowed"
-          )}
-          disabled={blockedByOther || blockStatus === "blockedByMe"}
-          onClick={toggleMediaPicker}
-          type="button"
-        >
-          <Sticker className="h-4 w-4" />
-        </button>
+        {!watchPartyMode ? (
+          <>
+            <button
+              aria-label="Resim ekle"
+              className={cn(
+                "inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900 text-zinc-300 hover:bg-zinc-800",
+                (blockedByOther || blockStatus === "blockedByMe") && "opacity-60 cursor-not-allowed"
+              )}
+              disabled={blockedByOther || blockStatus === "blockedByMe"}
+              onClick={() => attachmentInputRef.current?.click()}
+              type="button"
+            >
+              <ImagePlus className="h-4 w-4" />
+            </button>
+            <button
+              aria-label="Emoji ve Sticker"
+              className={cn(
+                "inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900 text-zinc-300 hover:bg-zinc-800",
+                (blockedByOther || blockStatus === "blockedByMe") && "opacity-60 cursor-not-allowed"
+              )}
+              disabled={blockedByOther || blockStatus === "blockedByMe"}
+              onClick={toggleMediaPicker}
+              type="button"
+            >
+              <Sticker className="h-4 w-4" />
+            </button>
+          </>
+        ) : onBack ? (
+          <button
+            aria-label="Video alanına dön"
+            className="inline-flex h-11 shrink-0 items-center justify-center rounded-lg border border-cyan-700/60 bg-cyan-600/20 px-3 text-xs font-semibold text-cyan-100 hover:bg-cyan-600/30"
+            onClick={onBack}
+            type="button"
+          >
+            Video
+          </button>
+        ) : null}
 
         {attachmentPreview ? (
           <div className="relative">
@@ -3458,7 +3442,7 @@ export function ChatWindow({
         </span>
       </div>
 
-      {mediaPickerOpen ? (
+      {mediaPickerOpen && !watchPartyMode ? (
         <div className="border-t border-zinc-800/80 bg-zinc-900/30 p-3">
           <div className="mb-2 flex gap-2">
             <button

@@ -76,6 +76,7 @@ export function ChatShell() {
   const [wpJoining, setWpJoining] = useState(false);
   const [wpJoinError, setWpJoinError] = useState<string | null>(null);
   const [wpRoomCreating, setWpRoomCreating] = useState(false);
+  const [watchPartyPickMode, setWatchPartyPickMode] = useState(false);
 
   const createWatchPartyRoom = useCallback(async () => {
     if (!user) return;
@@ -270,15 +271,21 @@ export function ChatShell() {
   useEffect(() => {
     if (!urlConversationId) return;
     setSelectedConversationId(urlConversationId);
-    if (!urlWpId) {
+    if (!urlWpId && activeTab !== "watch-party") {
       setActiveTab("conversations");
     }
-  }, [urlConversationId, urlWpId]);
+  }, [activeTab, urlConversationId, urlWpId]);
 
   // Reset the WP invite banner whenever the ?wp= param changes
   useEffect(() => {
     if (urlWpId) setWpBannerDismissed(false);
   }, [urlWpId]);
+
+  useEffect(() => {
+    if (activeTab !== "groups" && activeTab !== "watch-party" && watchPartyPickMode) {
+      setWatchPartyPickMode(false);
+    }
+  }, [activeTab, watchPartyPickMode]);
 
   useEffect(() => {
     if ((!isMobile && !isPWA) || typeof window === "undefined") {
@@ -1026,6 +1033,7 @@ export function ChatShell() {
                         conversationId={selectedConversationId}
                         networkOnline={isNetworkOnline}
                         canInlineInstall={Boolean(installPromptEvent)}
+                        watchPartyMode
                         onInlineInstall={handleInlineInstallFromDm}
                         onLeaveConversation={() => {
                           setSelectedConversationId(null);
@@ -1059,7 +1067,10 @@ export function ChatShell() {
                   </button>
                   <button
                     className="text-xs text-zinc-500 underline underline-offset-2 hover:text-zinc-300"
-                    onClick={() => setActiveTab("conversations")}
+                    onClick={() => {
+                      setWatchPartyPickMode(true);
+                      setActiveTab("groups");
+                    }}
                     type="button"
                   >
                     Mevcut grup sohbeti seç
@@ -1093,6 +1104,11 @@ export function ChatShell() {
                   onOpenConversation={(conversationId) => {
                     setSelectedConversationId(conversationId);
                     syncConversationInUrl(conversationId);
+                    if (watchPartyPickMode) {
+                      setWatchPartyPickMode(false);
+                      setActiveTab("watch-party");
+                      return;
+                    }
                     setActiveTab("conversations");
                   }}
                 />
@@ -1153,6 +1169,11 @@ export function ChatShell() {
                 onOpenConversation={(conversationId) => {
                   setSelectedConversationId(conversationId);
                   syncConversationInUrl(conversationId);
+                  if (watchPartyPickMode) {
+                    setWatchPartyPickMode(false);
+                    setActiveTab("watch-party");
+                    return;
+                  }
                   setActiveTab("conversations");
                 }}
               />
@@ -1221,6 +1242,7 @@ export function ChatShell() {
                         conversationId={selectedConversationId}
                         networkOnline={isNetworkOnline}
                         canInlineInstall={Boolean(installPromptEvent)}
+                        watchPartyMode
                         onInlineInstall={handleInlineInstallFromDm}
                         onBack={() => setWatchPartyMobilePane("video")}
                         onLeaveConversation={() => {
@@ -1252,7 +1274,10 @@ export function ChatShell() {
                   </button>
                   <button
                     className="text-xs text-zinc-500 underline underline-offset-2 hover:text-zinc-300"
-                    onClick={() => setActiveTab("conversations")}
+                    onClick={() => {
+                      setWatchPartyPickMode(true);
+                      setActiveTab("groups");
+                    }}
                     type="button"
                   >
                     Mevcut grup sohbeti seç

@@ -1,18 +1,14 @@
 "use client";
 
+import type { RealtimeChannel } from "@supabase/supabase-js";
 import { Check, ChevronDown, ChevronUp, Copy, ExternalLink, FastForward, Gauge, Link2, ListVideo, Pause, Play, Rewind, RotateCcw, SkipForward, StopCircle, Trash2, UserPlus, Volume2, VolumeX } from "lucide-react";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { WatchPartyTerms } from "./WatchPartyTerms";
 import {
   encodeWatchPartyEvent,
-  extractYouTubeVideoId,
-  fetchYouTubeVideoMeta,
-  loadWatchPartyLinkMode,
   parseWatchPartyBotPayload,
-  saveWatchPartyLinkMode,
   type WatchPartyEventPayload,
-  type WatchPartyLinkMode,
   type WatchPartyPromptPayload,
   type WatchPartyVideoMeta
 } from "@/lib/watchParty";
@@ -172,8 +168,6 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
   const [messages, setMessages] = useState<MessageRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [watchUrlInput, setWatchUrlInput] = useState("");
-  const [linkMode, setLinkMode] = useState<WatchPartyLinkMode>("ask");
 
   // Terms
   const [termsAccepted, setTermsAccepted] = useState<boolean>(() => {
@@ -181,16 +175,17 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
     return window.localStorage.getItem(TERMS_KEY) === "true";
   });
 
-  // Local-only video controls (per-user, not shared)
-  const [isLocalPaused, setIsLocalPaused] = useState(false);
-  const [isLocalMuted, setIsLocalMuted] = useState(false);
-  const [localPauseAt, setLocalPauseAt] = useState<number | null>(null);
-  const [localPlaybackRate, setLocalPlaybackRate] = useState(1);
+  const [sharedPaused, setSharedPaused] = useState(false);
+  const [sharedMuted, setSharedMuted] = useState(false);
+  const [sharedPlaybackRate, setSharedPlaybackRate] = useState(1);
+  const [syncAnchorMs, setSyncAnchorMs] = useState<number | null>(null);
+  const [pausedPositionSec, setPausedPositionSec] = useState<number | null>(null);
 
   const [roomOwnerId, setRoomOwnerId] = useState<string | null>(null);
 
   // Invite panel
   const [showInvitePanel, setShowInvitePanel] = useState(false);
+  const [showInviteModal, setShowInviteModal] = useState(false);
   const [friends, setFriends] = useState<FriendItem[]>([]);
   const [friendsLoading, setFriendsLoading] = useState(false);
   const [invitingId, setInvitingId] = useState<string | null>(null);
@@ -198,18 +193,65 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
   const [copiedLink, setCopiedLink] = useState(false);
 
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const lastAppliedPlaybackEventIdRef = useRef<string | null>(null);
+  const realtimeChannelRef = useRef<RealtimeChannel | null>(null);
+  const currentVideoIdRef = useRef<string | null>(null);
+  const syncAnchorMsRef = useRef<number | null>(null);
+  const sharedPausedRef = useRef(false);
+  const pausedPositionSecRef = useRef<number | null>(null);
+  const sharedMutedRef = useRef(false);
+  const sharedPlaybackRateRef = useRef(1);
+  const lastBroadcastSyncAtRef = useRef(0);
 
   const actorName = buildActorName(user);
   const projection = useMemo(() => projectQueueFromMessages(messages), [messages]);
   const isRoomOwner = Boolean(user?.id && roomOwnerId && user.id === roomOwnerId);
   const currentVideoId = projection.currentVideo?.videoId ?? null;
 
+  const sendYTCommand = useCallback((func: string, args?: unknown[]) => {
+    const targetWindow = iframeRef.current?.contentWindow;
+    if (!targetWindow) return;
+    const payload = { event: "command", func, args: args ?? [] };
+    targetWindow.postMessage(JSON.stringify(payload), "*");
+    targetWindow.postMessage(payload, "*");
+  }, []);
+
+  useEffect(() => {
+    currentVideoIdRef.current = currentVideoId;
+  }, [currentVideoId]);
+
+  useEffect(() => {
+    syncAnchorMsRef.current = syncAnchorMs;
+  }, [syncAnchorMs]);
+
+  useEffect(() => {
+    sharedPausedRef.current = sharedPaused;
+  }, [sharedPaused]);
+
+  useEffect(() => {
+    pausedPositionSecRef.current = pausedPositionSec;
+  }, [pausedPositionSec]);
+
+  useEffect(() => {
+    sharedMutedRef.current = sharedMuted;
+  }, [sharedMuted]);
+
+  useEffect(() => {
+    sharedPlaybackRateRef.current = sharedPlaybackRate;
+  }, [sharedPlaybackRate]);
+
   // Notify parent when the playing video changes
   useEffect(() => {
     onNowPlayingChange?.(projection.currentVideo, projection.currentVideoStartedAt);
-    // Reset local pause state when video changes
-    setIsLocalPaused(false);
-    setLocalPauseAt(null);
+    if (projection.currentVideoStartedAt) {
+      setSyncAnchorMs(new Date(projection.currentVideoStartedAt).getTime());
+    } else {
+      setSyncAnchorMs(null);
+    }
+    setSharedPaused(false);
+    setPausedPositionSec(null);
+    setSharedMuted(false);
+    setSharedPlaybackRate(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projection.currentVideo?.videoId, projection.currentVideoStartedAt]);
 
@@ -250,6 +292,69 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
 
     const channel = supabase
       .channel(`watch-party-feed:${conversationId}`)
+      .on("broadcast", { event: "wp-sync" }, (packet: unknown) => {
+        const payload = (packet as { payload?: unknown } | null)?.payload as {
+          videoId?: string;
+          positionSec?: number;
+          paused?: boolean;
+          muted?: boolean;
+          playbackRate?: number;
+          sentAtMs?: number;
+        };
+
+        const activeVideoId = currentVideoIdRef.current;
+        if (!activeVideoId || payload.videoId !== activeVideoId) return;
+
+        lastBroadcastSyncAtRef.current = Date.now();
+
+        const paused = Boolean(payload.paused);
+        const muted = Boolean(payload.muted);
+        const playbackRate =
+          typeof payload.playbackRate === "number" && Number.isFinite(payload.playbackRate)
+            ? payload.playbackRate
+            : 1;
+        const basePosition =
+          typeof payload.positionSec === "number" && Number.isFinite(payload.positionSec)
+            ? payload.positionSec
+            : 0;
+        const sentAtMs =
+          typeof payload.sentAtMs === "number" && Number.isFinite(payload.sentAtMs)
+            ? payload.sentAtMs
+            : Date.now();
+        const networkDeltaSec = Math.max(0, (Date.now() - sentAtMs) / 1000);
+        const incomingPosition = paused ? Math.max(0, basePosition) : Math.max(0, basePosition + networkDeltaSec);
+
+        const localExpected = sharedPausedRef.current
+          ? Math.max(0, pausedPositionSecRef.current ?? 0)
+          : Math.max(0, syncAnchorMsRef.current !== null ? (Date.now() - syncAnchorMsRef.current) / 1000 : 0);
+
+        if (Math.abs(incomingPosition - localExpected) > 0.25) {
+          sendYTCommand("seekTo", [incomingPosition, true]);
+        }
+
+        if (paused) {
+          setSharedPaused(true);
+          setPausedPositionSec(incomingPosition);
+          sendYTCommand("pauseVideo");
+        } else {
+          setSharedPaused(false);
+          setPausedPositionSec(null);
+          setSyncAnchorMs(Date.now() - incomingPosition * 1000);
+          sendYTCommand("playVideo");
+        }
+
+        setSharedPlaybackRate(playbackRate);
+        sendYTCommand("setPlaybackRate", [playbackRate]);
+
+        setSharedMuted(muted);
+        if (muted) {
+          sendYTCommand("setVolume", [0]);
+          sendYTCommand("mute");
+        } else {
+          sendYTCommand("setVolume", [100]);
+          sendYTCommand("unMute");
+        }
+      })
       .on(
         "postgres_changes",
         {
@@ -293,11 +398,14 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
       )
       .subscribe();
 
+    realtimeChannelRef.current = channel;
+
     return () => {
       cancelled = true;
+      realtimeChannelRef.current = null;
       void supabase.removeChannel(channel);
     };
-  }, [conversationId, isGroupConversation, supabase, user]);
+  }, [conversationId, isGroupConversation, sendYTCommand, supabase, user]);
 
   useEffect(() => {
     let cancelled = false;
@@ -323,14 +431,6 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
       cancelled = true;
     };
   }, [conversationId, supabase]);
-
-  useEffect(() => {
-    if (!user || !conversationId) {
-      setLinkMode("ask");
-      return;
-    }
-    setLinkMode(loadWatchPartyLinkMode(user.id, conversationId));
-  }, [conversationId, user]);
 
   const ensureCanInsertMessage = useCallback(async () => {
     if (!user || !conversationId) return false;
@@ -393,42 +493,6 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
     [actorName, conversationId, ensureCanInsertMessage, isRoomOwner, supabase, user]
   );
 
-  const setMode = useCallback(
-    (mode: WatchPartyLinkMode) => {
-      if (!user || !conversationId) return;
-      setLinkMode(mode);
-      saveWatchPartyLinkMode(user.id, conversationId, mode);
-    },
-    [conversationId, user]
-  );
-
-  const addVideoToQueue = useCallback(async () => {
-    if (!watchUrlInput.trim()) {
-      setError("YouTube linki veya video ID gir.");
-      return;
-    }
-
-    const videoId = extractYouTubeVideoId(watchUrlInput);
-    if (!videoId) {
-      setError("Geçersiz YouTube linki/video ID.");
-      return;
-    }
-
-    setError(null);
-    const video = await fetchYouTubeVideoMeta(videoId, watchUrlInput);
-    await insertEvent({ action: "queue_add", video });
-    setWatchUrlInput("");
-  }, [insertEvent, watchUrlInput]);
-
-  // ── YouTube iframe API (local only) ──────────────────────────────────
-  const sendYTCommand = useCallback((func: string, args?: unknown[]) => {
-    const targetWindow = iframeRef.current?.contentWindow;
-    if (!targetWindow) return;
-    const payload = { event: "command", func, args: args ?? [] };
-    targetWindow.postMessage(JSON.stringify(payload), "*");
-    targetWindow.postMessage(payload, "*");
-  }, []);
-
   const iframeSrc = useMemo(() => {
     if (!currentVideoId) return "";
     const base = `https://www.youtube.com/embed/${currentVideoId}?autoplay=1&rel=0&enablejsapi=1`;
@@ -443,49 +507,178 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
     return `${base}${originPart}&start=${elapsed}`;
   }, [currentVideoId, projection.currentVideoStartedAt]);
 
-  const getEstimatedElapsed = useCallback((): number => {
-    if (!projection.currentVideoStartedAt) return 0;
-    const startedMs = new Date(projection.currentVideoStartedAt).getTime();
-    if (localPauseAt !== null) return Math.max(0, (localPauseAt - startedMs) / 1000);
-    return Math.max(0, (Date.now() - startedMs) / 1000);
-  }, [localPauseAt, projection.currentVideoStartedAt]);
+  const getSharedElapsed = useCallback((): number => {
+    if (sharedPaused) return Math.max(0, pausedPositionSec ?? 0);
+    if (syncAnchorMs === null) return 0;
+    return Math.max(0, (Date.now() - syncAnchorMs) / 1000);
+  }, [pausedPositionSec, sharedPaused, syncAnchorMs]);
 
-  const toggleLocalPause = useCallback(() => {
-    if (isLocalPaused) {
-      sendYTCommand("playVideo");
-      setIsLocalPaused(false);
-      setLocalPauseAt(null);
-    } else {
-      sendYTCommand("pauseVideo");
-      setIsLocalPaused(true);
-      setLocalPauseAt(Date.now());
+  const toggleSharedPause = useCallback(() => {
+    const positionSec = getSharedElapsed();
+    if (sharedPaused) {
+      void insertEvent({ action: "player_resume", video: projection.currentVideo ?? undefined, positionSec });
+      return;
     }
-  }, [isLocalPaused, sendYTCommand]);
+    void insertEvent({ action: "player_pause", video: projection.currentVideo ?? undefined, positionSec });
+  }, [getSharedElapsed, insertEvent, projection.currentVideo, sharedPaused]);
 
-  const toggleLocalMute = useCallback(() => {
-    if (isLocalMuted) {
-      sendYTCommand("setVolume", [100]);
-      sendYTCommand("unMute");
-    } else {
+  const toggleSharedMute = useCallback(() => {
+    void insertEvent({
+      action: sharedMuted ? "player_unmute" : "player_mute",
+      video: projection.currentVideo ?? undefined
+    });
+  }, [insertEvent, projection.currentVideo, sharedMuted]);
+
+  const setSharedRate = useCallback((rate: number) => {
+    void insertEvent({ action: "player_rate", video: projection.currentVideo ?? undefined, playbackRate: rate });
+  }, [insertEvent, projection.currentVideo]);
+
+  const seekShared = useCallback((delta: number) => {
+    const positionSec = Math.max(0, getSharedElapsed() + delta);
+    void insertEvent({ action: "player_seek", video: projection.currentVideo ?? undefined, positionSec });
+  }, [getSharedElapsed, insertEvent, projection.currentVideo]);
+
+  const latestPlaybackEvent = useMemo(() => {
+    if (!projection.currentVideo?.videoId) return null;
+
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      const message = messages[i];
+      if (message.deleted || !isBotMessage(message.content)) continue;
+      const parsed = parseWatchPartyBotPayload(stripBotPrefix(message.content));
+      if (!parsed || parsed.kind !== "event") continue;
+      const action = parsed.payload.action;
+      const eventVideoId = parsed.payload.video?.videoId ?? null;
+      if (!eventVideoId || eventVideoId !== projection.currentVideo.videoId) continue;
+      if (
+        action === "player_pause" ||
+        action === "player_resume" ||
+        action === "player_seek" ||
+        action === "player_mute" ||
+        action === "player_unmute" ||
+        action === "player_rate"
+      ) {
+        return {
+          id: message.id,
+          createdAt: message.created_at,
+          payload: parsed.payload
+        };
+      }
+    }
+    return null;
+  }, [messages, projection.currentVideo?.videoId]);
+
+  useEffect(() => {
+    if (!latestPlaybackEvent) return;
+    if (lastAppliedPlaybackEventIdRef.current === latestPlaybackEvent.id) return;
+    lastAppliedPlaybackEventIdRef.current = latestPlaybackEvent.id;
+
+    const { action, positionSec, playbackRate } = latestPlaybackEvent.payload;
+    const eventMs = new Date(latestPlaybackEvent.createdAt).getTime();
+
+    if (action === "player_pause") {
+      const nextPos = Math.max(0, positionSec ?? getSharedElapsed());
+      setSharedPaused(true);
+      setPausedPositionSec(nextPos);
+      sendYTCommand("seekTo", [nextPos, true]);
+      sendYTCommand("pauseVideo");
+      return;
+    }
+
+    if (action === "player_resume") {
+      const nextPos = Math.max(0, positionSec ?? pausedPositionSec ?? 0);
+      setSharedPaused(false);
+      setPausedPositionSec(null);
+      setSyncAnchorMs(eventMs - nextPos * 1000);
+      sendYTCommand("seekTo", [nextPos, true]);
+      sendYTCommand("playVideo");
+      return;
+    }
+
+    if (action === "player_seek") {
+      const nextPos = Math.max(0, positionSec ?? 0);
+      if (sharedPaused) {
+        setPausedPositionSec(nextPos);
+      } else {
+        setSyncAnchorMs(eventMs - nextPos * 1000);
+      }
+      sendYTCommand("seekTo", [nextPos, true]);
+      if (!sharedPaused) sendYTCommand("playVideo");
+      return;
+    }
+
+    if (action === "player_mute") {
+      setSharedMuted(true);
       sendYTCommand("setVolume", [0]);
       sendYTCommand("mute");
+      return;
     }
-    setIsLocalMuted((prev) => !prev);
-  }, [isLocalMuted, sendYTCommand]);
 
-  const setPlaybackRate = useCallback((rate: number) => {
-    sendYTCommand("setPlaybackRate", [rate]);
-    setLocalPlaybackRate(rate);
-  }, [sendYTCommand]);
-
-  const seekLocal = useCallback((delta: number) => {
-    const pos = getEstimatedElapsed() + delta;
-    sendYTCommand("seekTo", [Math.max(0, pos), true]);
-    if (localPauseAt !== null) {
-      // update pause anchor so next seek is correct
-      setLocalPauseAt(Date.now() - (pos * 1000 - (Date.now() - (localPauseAt ?? Date.now()))));
+    if (action === "player_unmute") {
+      setSharedMuted(false);
+      sendYTCommand("setVolume", [100]);
+      sendYTCommand("unMute");
+      return;
     }
-  }, [getEstimatedElapsed, localPauseAt, sendYTCommand]);
+
+    if (action === "player_rate") {
+      const nextRate = playbackRate ?? 1;
+      setSharedPlaybackRate(nextRate);
+      sendYTCommand("setPlaybackRate", [nextRate]);
+    }
+  }, [getSharedElapsed, latestPlaybackEvent, pausedPositionSec, sendYTCommand, sharedPaused]);
+
+  useEffect(() => {
+    if (!isRoomOwner || !projection.currentVideo) return;
+
+    const sendSyncPacket = () => {
+      const channel = realtimeChannelRef.current;
+      if (!channel) return;
+
+      void channel.send({
+        type: "broadcast",
+        event: "wp-sync",
+        payload: {
+          videoId: projection.currentVideo?.videoId,
+          positionSec: getSharedElapsed(),
+          paused: sharedPaused,
+          muted: sharedMuted,
+          playbackRate: sharedPlaybackRate,
+          sentAtMs: Date.now()
+        }
+      });
+    };
+
+    sendSyncPacket();
+    const syncTimer = window.setInterval(sendSyncPacket, 400);
+    return () => {
+      window.clearInterval(syncTimer);
+    };
+  }, [getSharedElapsed, isRoomOwner, projection.currentVideo, sharedMuted, sharedPaused, sharedPlaybackRate]);
+
+  useEffect(() => {
+    if (!projection.currentVideo || sharedPaused || isRoomOwner) return;
+
+    const tick = () => {
+      if (Date.now() - lastBroadcastSyncAtRef.current < 1500) return;
+      const expectedPos = getSharedElapsed();
+      sendYTCommand("seekTo", [expectedPos, true]);
+      sendYTCommand("setPlaybackRate", [sharedPlaybackRate]);
+      if (sharedMuted) {
+        sendYTCommand("setVolume", [0]);
+        sendYTCommand("mute");
+      } else {
+        sendYTCommand("setVolume", [100]);
+        sendYTCommand("unMute");
+      }
+      sendYTCommand("playVideo");
+    };
+
+    tick();
+    const interval = window.setInterval(tick, 1000);
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [getSharedElapsed, isRoomOwner, projection.currentVideo, sendYTCommand, sharedMuted, sharedPaused, sharedPlaybackRate]);
 
   // ── Invite helpers ────────────────────────────────────────────────────
   const inviteLink = typeof window !== "undefined"
@@ -534,9 +727,9 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
   }, [supabase, user, inviteLink]);
 
   useEffect(() => {
-    if (showInvitePanel) void loadFriends();
+    if (showInviteModal) void loadFriends();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showInvitePanel]);
+  }, [showInviteModal]);
 
   const sendInviteDM = useCallback(async (friend: FriendItem) => {
     if (!user || invitingId) return;
@@ -616,28 +809,6 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
           )}
         </button>
 
-        {/* Link mode toggle */}
-        <div className="flex items-center gap-1 rounded-lg border border-zinc-700 bg-zinc-900 p-1">
-          {([
-            ["ask", "Sor"],
-            ["always_queue", "Hep Ekle"],
-            ["never", "Asla"],
-          ] as Array<[WatchPartyLinkMode, string]>).map(([mode, label]) => (
-            <button
-              key={mode}
-              className={cn(
-                "rounded-md px-2.5 py-1 text-[11px] font-medium transition-colors",
-                linkMode === mode
-                  ? "bg-cyan-600/30 text-cyan-100"
-                  : "text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
-              )}
-              onClick={() => setMode(mode)}
-              type="button"
-            >
-              {label}
-            </button>
-          ))}
-        </div>
       </div>
 
       {/* ── Invite panel ── */}
@@ -664,64 +835,87 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
             </button>
           </div>
 
-          {/* Friends list */}
-          <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-500">
+          <button
+            className="inline-flex items-center gap-2 rounded-lg border border-cyan-700/60 bg-cyan-600/20 px-3 py-2 text-xs font-semibold text-cyan-100 transition-colors hover:bg-cyan-600/30"
+            onClick={() => setShowInviteModal(true)}
+            type="button"
+          >
+            <UserPlus className="h-3.5 w-3.5" />
             Arkadaşlarını davet et
-          </p>
-          {friendsLoading ? (
-            <p className="text-[11px] text-zinc-500">Yükleniyor...</p>
-          ) : friends.length === 0 ? (
-            <p className="text-[11px] text-zinc-600">Arkadaş bulunamadı.</p>
-          ) : (
-            <div className="max-h-36 space-y-1.5 overflow-y-auto">
-              {friends.map((friend) => (
-                <div
-                  key={friend.id}
-                  className="flex items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1.5"
-                >
-                  {friend.avatarUrl ? (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img
-                      alt={friend.displayName}
-                      className="h-6 w-6 shrink-0 rounded-full object-cover"
-                      src={friend.avatarUrl}
-                    />
-                  ) : (
-                    <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-zinc-700 text-[10px] font-bold text-zinc-300">
-                      {friend.displayName.charAt(0).toUpperCase()}
-                    </div>
-                  )}
-                  <p className="min-w-0 flex-1 truncate text-[11px] text-zinc-200">
-                    {friend.displayName}
-                  </p>
-                  <button
-                    className={cn(
-                      "inline-flex shrink-0 items-center gap-1 rounded border px-2 py-0.5 text-[11px] transition-colors",
-                      inviteSuccess[friend.id]
-                        ? "border-green-600/60 bg-green-600/20 text-green-200"
-                        : "border-cyan-700/60 bg-cyan-600/20 text-cyan-100 hover:bg-cyan-600/30 disabled:opacity-50"
-                    )}
-                    disabled={invitingId === friend.id || !!inviteSuccess[friend.id]}
-                    onClick={() => void sendInviteDM(friend)}
-                    type="button"
-                  >
-                    {inviteSuccess[friend.id] ? (
-                      <>
-                        <Check className="h-3 w-3" />
-                        Gönderildi
-                      </>
-                    ) : invitingId === friend.id ? (
-                      "..."
-                    ) : (
-                      "Davet Et"
-                    )}
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
+          </button>
         </div>
       )}
+
+      {showInviteModal ? (
+        <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/60 p-4">
+          <div className="flex max-h-[70vh] w-full max-w-md flex-col overflow-hidden rounded-2xl border border-zinc-700 bg-zinc-950 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-3">
+              <p className="text-sm font-semibold text-zinc-100">Arkadaşlarını davet et</p>
+              <button
+                className="rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
+                onClick={() => setShowInviteModal(false)}
+                type="button"
+              >
+                Kapat
+              </button>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+              {friendsLoading ? (
+                <p className="text-[11px] text-zinc-500">Yükleniyor...</p>
+              ) : friends.length === 0 ? (
+                <p className="text-[11px] text-zinc-600">Arkadaş bulunamadı.</p>
+              ) : (
+                <div className="space-y-1.5">
+                  {friends.map((friend) => (
+                    <div
+                      key={friend.id}
+                      className="flex items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1.5"
+                    >
+                      {friend.avatarUrl ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img
+                          alt={friend.displayName}
+                          className="h-6 w-6 shrink-0 rounded-full object-cover"
+                          src={friend.avatarUrl}
+                        />
+                      ) : (
+                        <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-zinc-700 text-[10px] font-bold text-zinc-300">
+                          {friend.displayName.charAt(0).toUpperCase()}
+                        </div>
+                      )}
+                      <p className="min-w-0 flex-1 truncate text-[11px] text-zinc-200">
+                        {friend.displayName}
+                      </p>
+                      <button
+                        className={cn(
+                          "inline-flex shrink-0 items-center gap-1 rounded border px-2 py-0.5 text-[11px] transition-colors",
+                          inviteSuccess[friend.id]
+                            ? "border-green-600/60 bg-green-600/20 text-green-200"
+                            : "border-cyan-700/60 bg-cyan-600/20 text-cyan-100 hover:bg-cyan-600/30 disabled:opacity-50"
+                        )}
+                        disabled={invitingId === friend.id || !!inviteSuccess[friend.id]}
+                        onClick={() => void sendInviteDM(friend)}
+                        type="button"
+                      >
+                        {inviteSuccess[friend.id] ? (
+                          <>
+                            <Check className="h-3 w-3" />
+                            Gönderildi
+                          </>
+                        ) : invitingId === friend.id ? (
+                          "..."
+                        ) : (
+                          "Davet Et"
+                        )}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {/* ── Video player area ── */}
       <div className="shrink-0 bg-black">
@@ -763,32 +957,34 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
               </a>
             </div>
 
-            {/* ── Local controls (kişisel — sadece seni etkiler) ── */}
+            {/* ── Shared playback controls (owner only) ── */}
             <div className="flex flex-wrap items-center gap-1.5 border-t border-zinc-800/60 bg-zinc-950/80 px-3 py-2">
-              <span className="text-[10px] text-zinc-600 mr-1">Kişisel:</span>
+              <span className="text-[10px] text-zinc-600 mr-1">Ortak Oynatma:</span>
 
               {/* Duraklat / Devam */}
               <button
-                className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs font-medium text-zinc-200 transition-colors hover:bg-zinc-800"
-                onClick={toggleLocalPause}
-                title={isLocalPaused ? "Devam et" : "Duraklat (sadece sen)"}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs font-medium text-zinc-200 transition-colors hover:bg-zinc-800 disabled:opacity-40"
+                disabled={!isRoomOwner}
+                onClick={toggleSharedPause}
+                title={sharedPaused ? "Devam et (herkes için)" : "Duraklat (herkes için)"}
                 type="button"
               >
-                {isLocalPaused ? (
+                {sharedPaused ? (
                   <Play className="h-3.5 w-3.5 text-cyan-400" />
                 ) : (
                   <Pause className="h-3.5 w-3.5" />
                 )}
                 <span className="hidden sm:inline">
-                  {isLocalPaused ? "Devam" : "Duraklat"}
+                  {sharedPaused ? "Devam" : "Duraklat"}
                 </span>
               </button>
 
               {/* -10s */}
               <button
-                className="inline-flex items-center gap-1 rounded-lg border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs font-medium text-zinc-200 transition-colors hover:bg-zinc-800"
-                onClick={() => seekLocal(-10)}
-                title="-10 saniye"
+                className="inline-flex items-center gap-1 rounded-lg border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs font-medium text-zinc-200 transition-colors hover:bg-zinc-800 disabled:opacity-40"
+                disabled={!isRoomOwner}
+                onClick={() => seekShared(-10)}
+                title="-10 saniye (herkes için)"
                 type="button"
               >
                 <Rewind className="h-3.5 w-3.5" />
@@ -797,9 +993,10 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
 
               {/* +10s */}
               <button
-                className="inline-flex items-center gap-1 rounded-lg border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs font-medium text-zinc-200 transition-colors hover:bg-zinc-800"
-                onClick={() => seekLocal(10)}
-                title="+10 saniye"
+                className="inline-flex items-center gap-1 rounded-lg border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs font-medium text-zinc-200 transition-colors hover:bg-zinc-800 disabled:opacity-40"
+                disabled={!isRoomOwner}
+                onClick={() => seekShared(10)}
+                title="+10 saniye (herkes için)"
                 type="button"
               >
                 <FastForward className="h-3.5 w-3.5" />
@@ -808,12 +1005,13 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
 
               {/* Mute */}
               <button
-                className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs font-medium text-zinc-200 transition-colors hover:bg-zinc-800"
-                onClick={toggleLocalMute}
-                title={isLocalMuted ? "Sesi aç" : "Sessiz"}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs font-medium text-zinc-200 transition-colors hover:bg-zinc-800 disabled:opacity-40"
+                disabled={!isRoomOwner}
+                onClick={toggleSharedMute}
+                title={sharedMuted ? "Sesi aç (herkes için)" : "Sessiz (herkes için)"}
                 type="button"
               >
-                {isLocalMuted ? (
+                {sharedMuted ? (
                   <VolumeX className="h-3.5 w-3.5 text-amber-400" />
                 ) : (
                   <Volume2 className="h-3.5 w-3.5" />
@@ -825,13 +1023,14 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
                 {[0.75, 1, 1.25, 1.5, 2].map((rate) => (
                   <button
                     key={rate}
+                    disabled={!isRoomOwner}
                     className={cn(
-                      "rounded px-1.5 py-0.5 text-[11px] font-medium transition-colors",
-                      localPlaybackRate === rate
+                      "rounded px-1.5 py-0.5 text-[11px] font-medium transition-colors disabled:opacity-40",
+                      sharedPlaybackRate === rate
                         ? "bg-cyan-600/30 text-cyan-100"
                         : "text-zinc-300 hover:bg-zinc-800"
                     )}
-                    onClick={() => setPlaybackRate(rate)}
+                    onClick={() => setSharedRate(rate)}
                     type="button"
                   >
                     {rate}x
@@ -852,8 +1051,8 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
                   // Seek iframe to 0 immediately (no reload) then record the event
                   sendYTCommand("seekTo", [0, true]);
                   sendYTCommand("playVideo");
-                  setIsLocalPaused(false);
-                  setLocalPauseAt(null);
+                  setSharedPaused(false);
+                  setPausedPositionSec(null);
                   void insertEvent({
                     action: "queue_replay",
                     video: projection.currentVideo!,
@@ -971,26 +1170,16 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
         )}
       </div>
 
-      {/* ── Link input ── */}
-      <div className="shrink-0 border-t border-zinc-800 px-3 py-2">
-        <input
-          className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-xs text-zinc-100 outline-none transition-colors placeholder:text-zinc-500 focus:border-cyan-600/60 focus:ring-1 focus:ring-cyan-600/30"
-          onChange={(event) => setWatchUrlInput(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") {
-              event.preventDefault();
-              void addVideoToQueue();
-            }
-          }}
-          placeholder="YouTube link veya video ID — Enter ile ekle"
-          value={watchUrlInput}
-        />
-        {error ? (
-          <p className="mt-1 text-[11px] text-red-300">{error}</p>
-        ) : loading ? (
-          <p className="mt-1 text-[11px] text-zinc-500">Yükleniyor...</p>
-        ) : null}
-      </div>
+      {/* Link/ID input kaldırıldı: videolar sohbetten otomatik sıraya eklenir */}
+      {error ? (
+        <div className="shrink-0 border-t border-zinc-800 px-3 py-2">
+          <p className="text-[11px] text-red-300">{error}</p>
+        </div>
+      ) : loading ? (
+        <div className="shrink-0 border-t border-zinc-800 px-3 py-2">
+          <p className="text-[11px] text-zinc-500">Yükleniyor...</p>
+        </div>
+      ) : null}
 
       {/* ── Queue ── */}
       <div className="min-h-0 flex-1 overflow-y-auto">

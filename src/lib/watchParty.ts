@@ -27,7 +27,20 @@ export type WatchPartyPromptPayload = {
   video: WatchPartyVideoMeta;
 };
 
-export type WatchPartyEventAction = "queue_add" | "queue_skip" | "queue_remove" | "queue_clear" | "queue_play" | "queue_stop" | "queue_replay";
+export type WatchPartyEventAction =
+  | "queue_add"
+  | "queue_skip"
+  | "queue_remove"
+  | "queue_clear"
+  | "queue_play"
+  | "queue_stop"
+  | "queue_replay"
+  | "player_pause"
+  | "player_resume"
+  | "player_seek"
+  | "player_mute"
+  | "player_unmute"
+  | "player_rate";
 
 export type WatchPartyEventPayload = {
   schema: "watch_party_event_v1";
@@ -38,6 +51,8 @@ export type WatchPartyEventPayload = {
   createdAt: string;
   reason?: string;
   video?: WatchPartyVideoMeta;
+  positionSec?: number;
+  playbackRate?: number;
 };
 
 export type ParsedWatchPartyBotPayload =
@@ -253,7 +268,13 @@ function parseWatchPartyEventAction(value: unknown): WatchPartyEventAction | nul
     value === "queue_clear" ||
     value === "queue_play" ||
     value === "queue_stop" ||
-    value === "queue_replay"
+    value === "queue_replay" ||
+    value === "player_pause" ||
+    value === "player_resume" ||
+    value === "player_seek" ||
+    value === "player_mute" ||
+    value === "player_unmute" ||
+    value === "player_rate"
   ) {
     return value;
   }
@@ -271,6 +292,20 @@ function parseWatchPartyEventPayload(value: unknown): WatchPartyEventPayload | n
   const suggestionId = value.suggestionId;
   const reason = value.reason;
   const video = value.video === undefined ? undefined : parseWatchPartyVideoMeta(value.video);
+  const positionSecRaw = value.positionSec;
+  const playbackRateRaw = value.playbackRate;
+  const positionSec =
+    positionSecRaw === undefined
+      ? undefined
+      : typeof positionSecRaw === "number" && Number.isFinite(positionSecRaw)
+      ? positionSecRaw
+      : null;
+  const playbackRate =
+    playbackRateRaw === undefined
+      ? undefined
+      : typeof playbackRateRaw === "number" && Number.isFinite(playbackRateRaw)
+      ? playbackRateRaw
+      : null;
 
   if (
     schema !== "watch_party_event_v1" ||
@@ -291,6 +326,9 @@ function parseWatchPartyEventPayload(value: unknown): WatchPartyEventPayload | n
   if (value.video !== undefined && !video) {
     return null;
   }
+  if (positionSec === null || playbackRate === null) {
+    return null;
+  }
 
   return {
     schema,
@@ -300,7 +338,9 @@ function parseWatchPartyEventPayload(value: unknown): WatchPartyEventPayload | n
     createdAt,
     suggestionId: suggestionId as string | undefined,
     reason: reason as string | undefined,
-    video: video ?? undefined
+    video: video ?? undefined,
+    positionSec,
+    playbackRate
   };
 }
 
@@ -360,6 +400,25 @@ export function buildWatchPartyDisplayText(parsed: ParsedWatchPartyBotPayload): 
   }
   if (action === "queue_replay") {
     return `Watch Party: ${actorName} "${videoTitle}" videosunu yeniden baslatti`;
+  }
+  if (action === "player_pause") {
+    return `Watch Party: ${actorName} videoyu duraklatti`;
+  }
+  if (action === "player_resume") {
+    return `Watch Party: ${actorName} videoyu devam ettirdi`;
+  }
+  if (action === "player_seek") {
+    return `Watch Party: ${actorName} videoda konumu degistirdi`;
+  }
+  if (action === "player_mute") {
+    return `Watch Party: ${actorName} sesi kapatti`;
+  }
+  if (action === "player_unmute") {
+    return `Watch Party: ${actorName} sesi acti`;
+  }
+  if (action === "player_rate") {
+    const rate = parsed.payload.playbackRate ?? 1;
+    return `Watch Party: ${actorName} hizi ${rate}x yapti`;
   }
   return `Watch Party: ${actorName} sirayi temizledi`;
 }

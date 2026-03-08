@@ -41,7 +41,7 @@ export async function POST(request: NextRequest) {
 
     const { data: conversation, error: conversationError } = await admin
       .from("conversations")
-      .select("id, is_group")
+      .select("id, is_group, owner_id")
       .eq("id", conversationId)
       .maybeSingle();
 
@@ -55,6 +55,34 @@ export async function POST(request: NextRequest) {
 
     if (!conversation.is_group) {
       return NextResponse.json({ error: "Bu davet bir grup odasına ait değil." }, { status: 400 });
+    }
+
+    const { data: existingMembership, error: membershipError } = await admin
+      .from("participants")
+      .select("conversation_id")
+      .eq("conversation_id", conversationId)
+      .eq("user_id", user.id)
+      .maybeSingle();
+
+    if (membershipError) {
+      return NextResponse.json({ error: membershipError.message }, { status: 500 });
+    }
+
+    if (!existingMembership && conversation.owner_id && conversation.owner_id !== user.id) {
+      const { data: friendship, error: friendshipError } = await admin
+        .from("friendships")
+        .select("user_a")
+        .or(`and(user_a.eq.${user.id},user_b.eq.${conversation.owner_id}),and(user_a.eq.${conversation.owner_id},user_b.eq.${user.id})`)
+        .limit(1)
+        .maybeSingle();
+
+      if (friendshipError) {
+        return NextResponse.json({ error: friendshipError.message }, { status: 500 });
+      }
+
+      if (!friendship) {
+        return NextResponse.json({ error: "Bu odaya katılmak için oda sahibiyle arkadaş olmalısın." }, { status: 403 });
+      }
     }
 
     const { error: joinError } = await admin.from("participants").upsert(
