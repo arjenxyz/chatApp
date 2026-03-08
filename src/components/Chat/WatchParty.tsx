@@ -253,6 +253,8 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
   const syncFeedbackTimerRef = useRef<number | null>(null);
   const lastSyncSuccessFeedbackAtRef = useRef(0);
   const fullscreenOverlayTimerRef = useRef<number | null>(null);
+  const lastOverlayRevealAtRef = useRef(0);
+  const showFullscreenOverlayRef = useRef(false);
 
   const actorName = buildActorName(user);
   const projection = useMemo(() => projectQueueFromMessages(messages), [messages]);
@@ -270,10 +272,19 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
     if (projection.playedHistory.length === 0) return null;
     return projection.playedHistory[projection.playedHistory.length - 1] ?? null;
   }, [projection.playedHistory]);
-  const fullscreenChatMessages = useMemo(
-    () => messages.filter((message) => !message.deleted && !isBotMessage(message.content)).slice(-30),
-    [messages]
-  );
+  const fullscreenChatMessages = useMemo(() => {
+    return messages
+      .filter((message) => !message.deleted && !isBotMessage(message.content))
+      .slice(-30)
+      .map((message) => ({
+        id: message.id,
+        content: message.content,
+        timeLabel: new Date(message.created_at).toLocaleTimeString("tr-TR", {
+          hour: "2-digit",
+          minute: "2-digit"
+        })
+      }));
+  }, [messages]);
 
   const pushSyncFeedback = useCallback((message: string) => {
     setSyncFeedback(message);
@@ -321,6 +332,10 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
   useEffect(() => {
     sharedPlaybackRateRef.current = sharedPlaybackRate;
   }, [sharedPlaybackRate]);
+
+  useEffect(() => {
+    showFullscreenOverlayRef.current = showFullscreenOverlay;
+  }, [showFullscreenOverlay]);
 
   // Notify parent when the playing video changes
   useEffect(() => {
@@ -430,6 +445,7 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
       .channel(`watch-party-feed:${conversationId}`)
       .on("broadcast", { event: "wp-sync" }, (packet: unknown) => {
         const payload = (packet as { payload?: unknown } | null)?.payload as {
+          actorId?: string;
           videoId?: string;
           positionSec?: number;
           paused?: boolean;
@@ -437,6 +453,9 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
           playbackRate?: number;
           sentAtMs?: number;
         };
+
+        if (payload.actorId && payload.actorId === user?.id) return;
+        if (roomOwnerId && payload.actorId && payload.actorId !== roomOwnerId) return;
 
         const activeVideoId = currentVideoIdRef.current;
         if (!activeVideoId || payload.videoId !== activeVideoId) return;
@@ -459,7 +478,9 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
             ? payload.sentAtMs
             : Date.now();
         const networkDeltaSec = Math.max(0, (Date.now() - sentAtMs) / 1000);
-        const incomingPosition = paused ? Math.max(0, basePosition) : Math.max(0, basePosition + networkDeltaSec);
+        const incomingPosition = paused
+          ? Math.max(0, basePosition)
+          : Math.max(0, basePosition + networkDeltaSec * playbackRate);
         lastRemoteSyncRef.current = {
           videoId: activeVideoId,
           positionSec: basePosition,
@@ -474,8 +495,8 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
           : Math.max(0, syncAnchorMsRef.current !== null ? (Date.now() - syncAnchorMsRef.current) / 1000 : 0);
 
         const drift = incomingPosition - localExpected;
-        if (Math.abs(drift) > 0.25) {
-          sendYTCommand("seekTo", [incomingPosition, true]);
+        const shouldSeek = Math.abs(drift) > 0.35;
+        if (shouldSeek) {
           pushSyncFeedback(`${Math.abs(drift).toFixed(1)} sn ${drift > 0 ? "ileri" : "geri"} alındı`);
         } else if (Date.now() - lastSyncSuccessFeedbackAtRef.current > 12000) {
           lastSyncSuccessFeedbackAtRef.current = Date.now();
@@ -483,26 +504,42 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
         }
 
         if (paused) {
-          setSharedPaused(true);
+          if (!sharedPausedRef.current) {
+            setSharedPaused(true);
+            sendYTCommand("pauseVideo");
+          }
           setPausedPositionSec(incomingPosition);
-          sendYTCommand("pauseVideo");
+          if (shouldSeek) {
+            sendYTCommand("seekTo", [incomingPosition, true]);
+          }
         } else {
-          setSharedPaused(false);
+          if (sharedPausedRef.current) {
+            setSharedPaused(false);
+          }
           setPausedPositionSec(null);
           setSyncAnchorMs(Date.now() - incomingPosition * 1000);
-          sendYTCommand("playVideo");
+          if (shouldSeek) {
+            sendYTCommand("seekTo", [incomingPosition, true]);
+          }
+          if (sharedPausedRef.current || shouldSeek) {
+            sendYTCommand("playVideo");
+          }
         }
 
-        setSharedPlaybackRate(playbackRate);
-        sendYTCommand("setPlaybackRate", [playbackRate]);
+        setSharedPlaybackRate((prev) => (prev === playbackRate ? prev : playbackRate));
+        if (Math.abs(sharedPlaybackRateRef.current - playbackRate) > 0.001) {
+          sendYTCommand("setPlaybackRate", [playbackRate]);
+        }
 
-        setSharedMuted(muted);
-        if (muted) {
-          sendYTCommand("setVolume", [0]);
-          sendYTCommand("mute");
-        } else {
-          sendYTCommand("setVolume", [100]);
-          sendYTCommand("unMute");
+        setSharedMuted((prev) => (prev === muted ? prev : muted));
+        if (sharedMutedRef.current !== muted) {
+          if (muted) {
+            sendYTCommand("setVolume", [0]);
+            sendYTCommand("mute");
+          } else {
+            sendYTCommand("setVolume", [100]);
+            sendYTCommand("unMute");
+          }
         }
       })
       .on(
@@ -555,7 +592,7 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
       realtimeChannelRef.current = null;
       void supabase.removeChannel(channel);
     };
-  }, [conversationId, isGroupConversation, pushSyncFeedback, sendYTCommand, supabase, user]);
+  }, [conversationId, isGroupConversation, pushSyncFeedback, roomOwnerId, sendYTCommand, supabase, user]);
 
   useEffect(() => {
     let cancelled = false;
@@ -747,12 +784,18 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
         snapshot.videoId === currentVideoId
     );
 
+    const hasLocalTiming = sharedPaused ? pausedPositionSec !== null : syncAnchorMs !== null;
+    if (!canUseRemoteSnapshot && !hasLocalTiming) {
+      pushSyncFeedback("Owner senkronu bekleniyor, lütfen tekrar dene.");
+      return;
+    }
+
     const positionSec = canUseRemoteSnapshot
       ? Math.max(
           0,
           snapshot!.paused
             ? snapshot!.positionSec
-            : snapshot!.positionSec + Math.max(0, (Date.now() - snapshot!.sentAtMs) / 1000)
+            : snapshot!.positionSec + Math.max(0, (Date.now() - snapshot!.sentAtMs) / 1000) * snapshot!.playbackRate
         )
       : Math.max(0, getSharedElapsed());
 
@@ -787,7 +830,7 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
       sendYTCommand("playVideo");
     }
     pushSyncFeedback("Senkronize edildi");
-  }, [currentVideoId, getSharedElapsed, isRoomOwner, pushSyncFeedback, selectedPlaybackQuality, sendYTCommand, sharedMuted, sharedPaused, sharedPlaybackRate]);
+  }, [currentVideoId, getSharedElapsed, isRoomOwner, pausedPositionSec, pushSyncFeedback, selectedPlaybackQuality, sendYTCommand, sharedMuted, sharedPaused, sharedPlaybackRate, syncAnchorMs]);
 
   const togglePlayerFullscreen = useCallback(async () => {
     const container = playerContainerRef.current;
@@ -814,7 +857,15 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
   const revealFullscreenOverlay = useCallback(() => {
     if (!isPlayerFullscreen) return;
 
-    setShowFullscreenOverlay(true);
+    const now = performance.now();
+    if (now - lastOverlayRevealAtRef.current < 180) {
+      return;
+    }
+    lastOverlayRevealAtRef.current = now;
+
+    if (!showFullscreenOverlayRef.current) {
+      setShowFullscreenOverlay(true);
+    }
     if (fullscreenOverlayTimerRef.current !== null) {
       window.clearTimeout(fullscreenOverlayTimerRef.current);
     }
@@ -947,6 +998,7 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
         type: "broadcast",
         event: "wp-sync",
         payload: {
+          actorId: user?.id ?? null,
           videoId: projection.currentVideo?.videoId,
           positionSec: getSharedElapsed(),
           paused: sharedPaused,
@@ -958,11 +1010,11 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
     };
 
     sendSyncPacket();
-    const syncTimer = window.setInterval(sendSyncPacket, 400);
+    const syncTimer = window.setInterval(sendSyncPacket, 700);
     return () => {
       window.clearInterval(syncTimer);
     };
-  }, [getSharedElapsed, isRoomOwner, projection.currentVideo, sharedMuted, sharedPaused, sharedPlaybackRate]);
+  }, [getSharedElapsed, isRoomOwner, projection.currentVideo, sharedMuted, sharedPaused, sharedPlaybackRate, user?.id]);
 
   useEffect(() => {
     if (!projection.currentVideo || sharedPaused || isRoomOwner) return;
@@ -974,8 +1026,15 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
       }
       setSyncHealth("lagging");
       const expectedPos = getSharedElapsed();
-      sendYTCommand("seekTo", [expectedPos, true]);
-      sendYTCommand("setPlaybackRate", [sharedPlaybackRate]);
+      const localPos = sharedPausedRef.current
+        ? Math.max(0, pausedPositionSecRef.current ?? 0)
+        : Math.max(0, syncAnchorMsRef.current !== null ? (Date.now() - syncAnchorMsRef.current) / 1000 : 0);
+      if (Math.abs(expectedPos - localPos) > 0.8) {
+        sendYTCommand("seekTo", [expectedPos, true]);
+      }
+      if (Math.abs(sharedPlaybackRateRef.current - sharedPlaybackRate) > 0.001) {
+        sendYTCommand("setPlaybackRate", [sharedPlaybackRate]);
+      }
       if (sharedMuted) {
         sendYTCommand("setVolume", [0]);
         sendYTCommand("mute");
@@ -983,7 +1042,9 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
         sendYTCommand("setVolume", [100]);
         sendYTCommand("unMute");
       }
-      sendYTCommand("playVideo");
+      if (!sharedPausedRef.current) {
+        sendYTCommand("playVideo");
+      }
       pushSyncFeedback("Gecikme algılandı, senkron yenilendi");
     };
 
@@ -1272,31 +1333,79 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
               {/* Transparent overlay — blocks accidental mouse interaction with the iframe */}
               <div className="absolute inset-0 z-10 cursor-default" />
 
-              {isPlayerFullscreen && showFullscreenChat ? (
-                <div className="absolute right-3 top-3 z-30 w-[min(24rem,calc(100%-1.5rem))] rounded-xl border border-zinc-700 bg-zinc-950/95 shadow-lg backdrop-blur-sm">
-                  <div className="flex items-center justify-between border-b border-zinc-800 px-3 py-2">
-                    <p className="text-xs font-semibold text-zinc-100">Sohbet</p>
-                    <button
-                      className="inline-flex items-center gap-1 rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-[11px] text-zinc-200 transition-colors hover:bg-zinc-800"
-                      onClick={() => setShowFullscreenChat(false)}
-                      type="button"
-                    >
-                      <X className="h-3.5 w-3.5" />
-                      Kapat
-                    </button>
-                  </div>
-                  <div className="max-h-64 space-y-1 overflow-y-auto px-3 py-2">
-                    {fullscreenChatMessages.length === 0 ? (
-                      <p className="text-[11px] text-zinc-500">Gösterilecek sohbet mesajı yok.</p>
-                    ) : (
-                      fullscreenChatMessages.map((message) => (
-                        <div key={message.id} className="rounded-md border border-zinc-800 bg-zinc-900/70 px-2 py-1.5">
-                          <p className="line-clamp-3 text-[11px] text-zinc-200">{message.content}</p>
-                        </div>
-                      ))
+              {isPlayerFullscreen ? (
+                <>
+                  <div
+                    className={cn(
+                      "absolute inset-0 z-[25] bg-zinc-950/45 backdrop-blur-[1px] transition-opacity duration-300",
+                      showFullscreenChat ? "opacity-100" : "pointer-events-none opacity-0"
                     )}
+                    onClick={() => setShowFullscreenChat(false)}
+                  />
+                  <div
+                    className={cn(
+                      "absolute right-3 top-3 z-30 flex h-[min(30rem,calc(100%-1.5rem))] w-[min(25rem,calc(100%-1.5rem))] flex-col overflow-hidden rounded-2xl border border-zinc-700/90 bg-zinc-950/88 shadow-2xl backdrop-blur-md",
+                      "transition-all duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]",
+                      showFullscreenChat
+                        ? "translate-x-0 scale-100 opacity-100"
+                        : "pointer-events-none translate-x-16 scale-95 opacity-0"
+                    )}
+                  >
+                    <div className="border-b border-zinc-800/90 bg-zinc-900/80 px-3 py-2.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <div>
+                          <p className="text-xs font-semibold tracking-wide text-zinc-100">Sohbet Merkezi</p>
+                          <p className="text-[11px] text-zinc-400">Tam ekran hızlı etkileşim paneli</p>
+                        </div>
+                        <button
+                          className="inline-flex items-center gap-1 rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-[11px] text-zinc-200 transition-colors hover:bg-zinc-800"
+                          onClick={() => setShowFullscreenChat(false)}
+                          type="button"
+                        >
+                          <X className="h-3.5 w-3.5" />
+                          Kapat
+                        </button>
+                      </div>
+                      <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                        <span className="rounded-full border border-zinc-700 bg-zinc-900/80 px-2 py-0.5 text-[10px] text-zinc-300">
+                          Online: {onlineMemberCount}
+                        </span>
+                        <span className="rounded-full border border-zinc-700 bg-zinc-900/80 px-2 py-0.5 text-[10px] text-zinc-300">
+                          Senkron: {syncHealth === "good" ? "İyi" : "Gecikmeli"}
+                        </span>
+                        <button
+                          className="inline-flex items-center gap-1 rounded-full border border-cyan-700/60 bg-cyan-600/20 px-2 py-0.5 text-[10px] text-cyan-100 transition-colors hover:bg-cyan-600/30"
+                          onClick={resyncLocalPlayer}
+                          type="button"
+                        >
+                          <RotateCcw className="h-3 w-3" />
+                          Senkronla
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="min-h-0 flex-1 space-y-1.5 overflow-y-auto bg-zinc-950/70 px-3 py-2.5">
+                      {fullscreenChatMessages.length === 0 ? (
+                        <p className="rounded-lg border border-zinc-800 bg-zinc-900/70 px-2.5 py-2 text-[11px] text-zinc-500">
+                          Gösterilecek sohbet mesajı yok.
+                        </p>
+                      ) : (
+                        fullscreenChatMessages.map((message) => (
+                          <div
+                            key={message.id}
+                            className="rounded-lg border border-zinc-800/90 bg-zinc-900/80 px-2.5 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.02)]"
+                          >
+                            <div className="mb-1 flex items-center justify-between">
+                              <span className="text-[10px] text-zinc-500">Sohbet</span>
+                              <span className="text-[10px] text-zinc-500">{message.timeLabel}</span>
+                            </div>
+                            <p className="line-clamp-4 text-[11px] leading-relaxed text-zinc-200">{message.content}</p>
+                          </div>
+                        ))
+                      )}
+                    </div>
                   </div>
-                </div>
+                </>
               ) : null}
 
               {isPlayerFullscreen && showFullscreenOverlay ? (
