@@ -2299,7 +2299,7 @@ export function ChatWindow({
 
   const handleWatchPartyLinkAutomation = useCallback(
     async (sourceMessageId: string, sourceText: string) => {
-      if (!user || !conversationId || !isGroupConversation || !isGroupOwner) return;
+      if (!user || !conversationId || !isGroupConversation) return;
 
       const foundVideos = extractYouTubeVideosFromText(sourceText);
       if (foundVideos.length === 0) return;
@@ -2323,7 +2323,7 @@ export function ChatWindow({
         await insertBotMessage(encodeWatchPartyEvent(queueEvent), sourceMessageId);
       }
     },
-    [conversationId, insertBotMessage, isGroupConversation, isGroupOwner, user]
+    [conversationId, insertBotMessage, isGroupConversation, user]
   );
 
   const send = useCallback(async () => {
