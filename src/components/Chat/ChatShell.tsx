@@ -270,8 +270,10 @@ export function ChatShell() {
   useEffect(() => {
     if (!urlConversationId) return;
     setSelectedConversationId(urlConversationId);
-    setActiveTab("conversations");
-  }, [urlConversationId]);
+    if (!urlWpId) {
+      setActiveTab("conversations");
+    }
+  }, [urlConversationId, urlWpId]);
 
   // Reset the WP invite banner whenever the ?wp= param changes
   useEffect(() => {
@@ -358,8 +360,17 @@ export function ChatShell() {
     [supabase]
   );
 
+  const finalizeWatchPartyJoin = useCallback((conversationId: string) => {
+    setSelectedConversationId(conversationId);
+    setActiveTab("watch-party");
+    setWpBannerDismissed(true);
+    setWpJoinError(null);
+    setWpJoining(false);
+    router.replace(`/chat?conversation=${conversationId}`, { scroll: false });
+  }, [router]);
+
   useEffect(() => {
-    if (!user || !urlWpId || wpJoining) return;
+    if (!user || !urlWpId) return;
 
     let cancelled = false;
     setWpJoinError(null);
@@ -376,23 +387,13 @@ export function ChatShell() {
         return;
       }
 
-      setSelectedConversationId(urlWpId);
-      setActiveTab("watch-party");
-      setWpBannerDismissed(true);
-      setWpJoinError(null);
-      setWpJoining(false);
-
-      const params = new URLSearchParams(searchParams.toString());
-      params.delete("wp");
-      params.set("conversation", urlWpId);
-      const query = params.toString();
-      router.replace(query ? `/chat?${query}` : "/chat", { scroll: false });
+      finalizeWatchPartyJoin(urlWpId);
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [joinWatchPartyViaInvite, router, searchParams, supabase, urlWpId, user, wpJoining]);
+  }, [finalizeWatchPartyJoin, joinWatchPartyViaInvite, urlWpId, user]);
 
   const ensureSystemConversation = useCallback(async (): Promise<string> => {
     if (!user) throw new Error("Oturum bulunamadı.");
@@ -1302,17 +1303,7 @@ export function ChatShell() {
                 return;
               }
 
-              setSelectedConversationId(urlWpId);
-              setActiveTab("watch-party");
-              setWpBannerDismissed(true);
-              setWpJoinError(null);
-              setWpJoining(false);
-
-              const params = new URLSearchParams(searchParams.toString());
-              params.delete("wp");
-              params.set("conversation", urlWpId);
-              const query = params.toString();
-              router.replace(query ? `/chat?${query}` : "/chat", { scroll: false });
+              finalizeWatchPartyJoin(urlWpId);
             })();
           }}
           type="button"

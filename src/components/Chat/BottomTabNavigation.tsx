@@ -24,7 +24,7 @@ export function BottomTabNavigation({ activeTab, onTabChange, mobileHidden = fal
   return (
     <nav
       className={cn(
-        "fixed bottom-0 left-0 right-0 border-t border-zinc-800 bg-zinc-950/95 px-0 py-0 backdrop-blur md:relative md:rounded-xl md:border md:border-zinc-800 md:bg-zinc-900/45 md:px-2 md:py-2 md:backdrop-blur",
+        "fixed bottom-0 left-0 right-0 z-[100] pointer-events-auto border-t border-zinc-800 bg-zinc-950/95 px-0 py-0 backdrop-blur md:relative md:z-auto md:rounded-xl md:border md:border-zinc-800 md:bg-zinc-900/45 md:px-2 md:py-2 md:backdrop-blur",
         mobileHidden && "hidden md:block"
       )}
       style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
