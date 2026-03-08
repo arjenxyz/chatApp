@@ -1,7 +1,7 @@
 "use client";
 
 import type { RealtimeChannel } from "@supabase/supabase-js";
-import { Check, ChevronDown, ChevronUp, Copy, ExternalLink, FastForward, Gauge, Link2, ListVideo, Maximize2, MessageCircle, Minimize2, MoreHorizontal, Pause, Play, Rewind, RotateCcw, RotateCw, SkipBack, SkipForward, StopCircle, Trash2, UserPlus, X } from "lucide-react";
+import { Check, ChevronDown, ChevronUp, Copy, ExternalLink, FastForward, Gauge, Link2, ListVideo, Maximize2, MessageCircle, Minimize2, MoreHorizontal, Pause, PictureInPicture2, Play, Rewind, RotateCcw, RotateCw, SkipBack, SkipForward, StopCircle, Trash2, UserPlus, X } from "lucide-react";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { WatchPartyTerms } from "./WatchPartyTerms";
@@ -43,7 +43,6 @@ type FriendItem = {
 };
 
 type PlayerQuality = "auto" | "hd1080" | "hd720" | "large" | "medium" | "small" | "tiny";
-
 type RemoteSyncSnapshot = {
   videoId: string;
   positionSec: number;
@@ -227,6 +226,10 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
   const [selectedPlaybackQuality, setSelectedPlaybackQuality] = useState<PlayerQuality>("auto");
   const [showFullscreenOverlay, setShowFullscreenOverlay] = useState(false);
   const [showFullscreenChat, setShowFullscreenChat] = useState(false);
+  const [isMiniPlayerMode, setIsMiniPlayerMode] = useState(false);
+  const [miniPlayerWidth, setMiniPlayerWidth] = useState(320);
+  const [fullscreenChatDraft, setFullscreenChatDraft] = useState("");
+  const [sendingFullscreenChat, setSendingFullscreenChat] = useState(false);
   const [showMorePlayerControls, setShowMorePlayerControls] = useState(false);
 
   // Invite panel
@@ -255,6 +258,9 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
   const fullscreenOverlayTimerRef = useRef<number | null>(null);
   const lastOverlayRevealAtRef = useRef(0);
   const showFullscreenOverlayRef = useRef(false);
+  const miniResizeStartXRef = useRef(0);
+  const miniResizeStartWidthRef = useRef(320);
+  const isMiniResizingRef = useRef(false);
 
   const actorName = buildActorName(user);
   const projection = useMemo(() => projectQueueFromMessages(messages), [messages]);
@@ -278,6 +284,7 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
       .slice(-30)
       .map((message) => ({
         id: message.id,
+        senderId: message.sender_id,
         content: message.content,
         timeLabel: new Date(message.created_at).toLocaleTimeString("tr-TR", {
           hour: "2-digit",
@@ -361,6 +368,9 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
       setShowFullscreenOverlay(nextFullscreen);
       if (!nextFullscreen) {
         setShowFullscreenChat(false);
+        if (currentVideoIdRef.current && window.matchMedia("(max-width: 768px)").matches) {
+          setIsMiniPlayerMode(true);
+        }
         try {
           screen.orientation?.unlock?.();
         } catch {
@@ -376,10 +386,9 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
       if (nextFullscreen) {
         try {
           if (window.matchMedia("(max-width: 768px)").matches) {
-            const lockOrientation = (screen.orientation as ScreenOrientation & {
+            void (screen.orientation as ScreenOrientation & {
               lock?: (orientation: "portrait" | "landscape") => Promise<void>;
-            }).lock;
-            void lockOrientation?.("landscape");
+            }).lock?.("landscape");
           }
         } catch {
           // Ignore unsupported orientation lock errors
@@ -405,6 +414,10 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
       }
     };
   }, []);
+
+  useEffect(() => {
+    setIsMiniPlayerMode(false);
+  }, [projection.currentVideo?.videoId]);
 
   useEffect(() => {
     if (!user || !conversationId || !isGroupConversation) {
@@ -478,9 +491,7 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
             ? payload.sentAtMs
             : Date.now();
         const networkDeltaSec = Math.max(0, (Date.now() - sentAtMs) / 1000);
-        const incomingPosition = paused
-          ? Math.max(0, basePosition)
-          : Math.max(0, basePosition + networkDeltaSec * playbackRate);
+        const incomingPosition = paused ? Math.max(0, basePosition) : Math.max(0, basePosition + networkDeltaSec);
         lastRemoteSyncRef.current = {
           videoId: activeVideoId,
           positionSec: basePosition,
@@ -495,8 +506,8 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
           : Math.max(0, syncAnchorMsRef.current !== null ? (Date.now() - syncAnchorMsRef.current) / 1000 : 0);
 
         const drift = incomingPosition - localExpected;
-        const shouldSeek = Math.abs(drift) > 0.35;
-        if (shouldSeek) {
+        if (Math.abs(drift) > 0.25) {
+          sendYTCommand("seekTo", [incomingPosition, true]);
           pushSyncFeedback(`${Math.abs(drift).toFixed(1)} sn ${drift > 0 ? "ileri" : "geri"} alındı`);
         } else if (Date.now() - lastSyncSuccessFeedbackAtRef.current > 12000) {
           lastSyncSuccessFeedbackAtRef.current = Date.now();
@@ -504,42 +515,26 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
         }
 
         if (paused) {
-          if (!sharedPausedRef.current) {
-            setSharedPaused(true);
-            sendYTCommand("pauseVideo");
-          }
+          setSharedPaused(true);
           setPausedPositionSec(incomingPosition);
-          if (shouldSeek) {
-            sendYTCommand("seekTo", [incomingPosition, true]);
-          }
+          sendYTCommand("pauseVideo");
         } else {
-          if (sharedPausedRef.current) {
-            setSharedPaused(false);
-          }
+          setSharedPaused(false);
           setPausedPositionSec(null);
           setSyncAnchorMs(Date.now() - incomingPosition * 1000);
-          if (shouldSeek) {
-            sendYTCommand("seekTo", [incomingPosition, true]);
-          }
-          if (sharedPausedRef.current || shouldSeek) {
-            sendYTCommand("playVideo");
-          }
+          sendYTCommand("playVideo");
         }
 
-        setSharedPlaybackRate((prev) => (prev === playbackRate ? prev : playbackRate));
-        if (Math.abs(sharedPlaybackRateRef.current - playbackRate) > 0.001) {
-          sendYTCommand("setPlaybackRate", [playbackRate]);
-        }
+        setSharedPlaybackRate(playbackRate);
+        sendYTCommand("setPlaybackRate", [playbackRate]);
 
-        setSharedMuted((prev) => (prev === muted ? prev : muted));
-        if (sharedMutedRef.current !== muted) {
-          if (muted) {
-            sendYTCommand("setVolume", [0]);
-            sendYTCommand("mute");
-          } else {
-            sendYTCommand("setVolume", [100]);
-            sendYTCommand("unMute");
-          }
+        setSharedMuted(muted);
+        if (muted) {
+          sendYTCommand("setVolume", [0]);
+          sendYTCommand("mute");
+        } else {
+          sendYTCommand("setVolume", [100]);
+          sendYTCommand("unMute");
         }
       })
       .on(
@@ -737,6 +732,38 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
     [actorName, conversationId, ensureCanInsertMessage, isRoomOwner, supabase, user]
   );
 
+  const sendFullscreenChatMessage = useCallback(async () => {
+    if (!user || !conversationId || sendingFullscreenChat) return;
+    const content = fullscreenChatDraft.trim();
+    if (!content) return;
+    if (!(await ensureCanInsertMessage())) return;
+
+    setSendingFullscreenChat(true);
+    const { data: inserted, error: insertError } = await supabase
+      .from("messages")
+      .insert({
+        conversation_id: conversationId,
+        sender_id: user.id,
+        content,
+        type: "text"
+      })
+      .select("id, sender_id, content, created_at, deleted")
+      .maybeSingle();
+
+    setSendingFullscreenChat(false);
+
+    if (insertError) {
+      setError(mapUserFacingError(insertError.message, "Mesaj gönderilemedi."));
+      return;
+    }
+
+    setFullscreenChatDraft("");
+    if (inserted) {
+      const next = inserted as MessageRow;
+      setMessages((prev) => (prev.some((item) => item.id === next.id) ? prev : [...prev, next]));
+    }
+  }, [conversationId, ensureCanInsertMessage, fullscreenChatDraft, sendingFullscreenChat, supabase, user]);
+
   const iframeSrc = useMemo(() => {
     if (!currentVideoId) return "";
     const base = `https://www.youtube.com/embed/${currentVideoId}?autoplay=1&rel=0&enablejsapi=1`;
@@ -881,22 +908,63 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
       return;
     }
 
-    const lockOrientation = (screen.orientation as ScreenOrientation & {
+    const orientationApi = screen.orientation as ScreenOrientation & {
       lock?: (orientation: "portrait" | "landscape") => Promise<void>;
-    }).lock;
+    };
 
-    if (!lockOrientation) {
+    if (!orientationApi.lock) {
       pushSyncFeedback("Cihaz yatay kilitlemeyi desteklemiyor.");
       return;
     }
 
     try {
-      await lockOrientation("landscape");
+      await orientationApi.lock("landscape");
       pushSyncFeedback("Yatay moda geçildi.");
     } catch {
       pushSyncFeedback("Yatay moda geçiş başarısız.");
     }
   }, [isPlayerFullscreen, pushSyncFeedback]);
+
+  const clampMiniWidth = useCallback((width: number) => {
+    const viewportWidth = typeof window === "undefined" ? 1200 : window.innerWidth;
+    const minWidth = 220;
+    const maxWidth = Math.max(280, Math.floor(viewportWidth * 0.9));
+    return Math.min(maxWidth, Math.max(minWidth, Math.round(width)));
+  }, []);
+
+  const startMiniResize = useCallback((event: React.MouseEvent<HTMLButtonElement>) => {
+    if (!isMiniPlayerMode || isPlayerFullscreen) return;
+    event.preventDefault();
+    event.stopPropagation();
+    isMiniResizingRef.current = true;
+    miniResizeStartXRef.current = event.clientX;
+    miniResizeStartWidthRef.current = miniPlayerWidth;
+    document.body.style.userSelect = "none";
+  }, [isMiniPlayerMode, isPlayerFullscreen, miniPlayerWidth]);
+
+  useEffect(() => {
+    const onMouseMove = (event: MouseEvent) => {
+      if (!isMiniResizingRef.current) return;
+      const deltaX = event.clientX - miniResizeStartXRef.current;
+      const nextWidth = clampMiniWidth(miniResizeStartWidthRef.current + deltaX);
+      setMiniPlayerWidth(nextWidth);
+    };
+
+    const stopResize = () => {
+      if (!isMiniResizingRef.current) return;
+      isMiniResizingRef.current = false;
+      document.body.style.userSelect = "";
+    };
+
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", stopResize);
+
+    return () => {
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", stopResize);
+      document.body.style.userSelect = "";
+    };
+  }, [clampMiniWidth]);
 
   const latestPlaybackEvent = useMemo(() => {
     if (!projection.currentVideo?.videoId) return null;
@@ -1010,7 +1078,7 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
     };
 
     sendSyncPacket();
-    const syncTimer = window.setInterval(sendSyncPacket, 700);
+    const syncTimer = window.setInterval(sendSyncPacket, 400);
     return () => {
       window.clearInterval(syncTimer);
     };
@@ -1026,15 +1094,8 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
       }
       setSyncHealth("lagging");
       const expectedPos = getSharedElapsed();
-      const localPos = sharedPausedRef.current
-        ? Math.max(0, pausedPositionSecRef.current ?? 0)
-        : Math.max(0, syncAnchorMsRef.current !== null ? (Date.now() - syncAnchorMsRef.current) / 1000 : 0);
-      if (Math.abs(expectedPos - localPos) > 0.8) {
-        sendYTCommand("seekTo", [expectedPos, true]);
-      }
-      if (Math.abs(sharedPlaybackRateRef.current - sharedPlaybackRate) > 0.001) {
-        sendYTCommand("setPlaybackRate", [sharedPlaybackRate]);
-      }
+      sendYTCommand("seekTo", [expectedPos, true]);
+      sendYTCommand("setPlaybackRate", [sharedPlaybackRate]);
       if (sharedMuted) {
         sendYTCommand("setVolume", [0]);
         sendYTCommand("mute");
@@ -1042,9 +1103,7 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
         sendYTCommand("setVolume", [100]);
         sendYTCommand("unMute");
       }
-      if (!sharedPausedRef.current) {
-        sendYTCommand("playVideo");
-      }
+      sendYTCommand("playVideo");
       pushSyncFeedback("Gecikme algılandı, senkron yenilendi");
     };
 
@@ -1316,7 +1375,15 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
             {/* Iframe wrapper with blocking overlay */}
             <div
               ref={playerContainerRef}
-              className="relative aspect-video w-full bg-black"
+              className={cn(
+                "relative aspect-video bg-black",
+                isMiniPlayerMode
+                  ? cn(
+                      "fixed bottom-20 right-3 z-40 w-[calc(100vw-1.5rem)] max-w-[90vw] overflow-hidden rounded-xl border border-zinc-700 shadow-2xl"
+                    )
+                  : "w-full"
+              )}
+              style={isMiniPlayerMode ? { width: `${clampMiniWidth(miniPlayerWidth)}px` } : undefined}
               onClick={revealFullscreenOverlay}
               onMouseMove={revealFullscreenOverlay}
               onTouchStart={revealFullscreenOverlay}
@@ -1333,11 +1400,45 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
               {/* Transparent overlay — blocks accidental mouse interaction with the iframe */}
               <div className="absolute inset-0 z-10 cursor-default" />
 
+              {isMiniPlayerMode && !isPlayerFullscreen ? (
+                <div className="absolute inset-x-0 bottom-0 z-20 bg-gradient-to-t from-black/85 to-transparent px-2 pb-2 pt-5">
+                  <div className="flex items-center justify-end gap-1.5">
+                    <button
+                      className="inline-flex items-center gap-1 rounded-md border border-zinc-600 bg-zinc-900/90 px-2 py-1 text-[10px] text-zinc-100 transition-colors hover:bg-zinc-800"
+                      onClick={() => setIsMiniPlayerMode(false)}
+                      type="button"
+                    >
+                      <Maximize2 className="h-3 w-3" />
+                      Aç
+                    </button>
+                    <button
+                      className="inline-flex items-center gap-1 rounded-md border border-zinc-600 bg-zinc-900/90 px-2 py-1 text-[10px] text-zinc-100 transition-colors hover:bg-zinc-800"
+                      onClick={() => setIsMiniPlayerMode(false)}
+                      type="button"
+                    >
+                      <X className="h-3 w-3" />
+                      Kapat
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+
+              {isMiniPlayerMode && !isPlayerFullscreen ? (
+                <button
+                  aria-label="Mini oynatıcıyı yeniden boyutlandır"
+                  className="absolute bottom-0 right-0 z-30 h-5 w-5 cursor-se-resize rounded-tl-md border-l border-t border-zinc-600 bg-zinc-900/90 text-zinc-300"
+                  onMouseDown={startMiniResize}
+                  type="button"
+                >
+                  <span className="pointer-events-none block translate-y-[-1px] text-[10px]">↘</span>
+                </button>
+              ) : null}
+
               {isPlayerFullscreen ? (
                 <>
                   <div
                     className={cn(
-                      "absolute inset-0 z-[25] bg-zinc-950/45 backdrop-blur-[1px] transition-opacity duration-300",
+                      "absolute inset-0 z-[15] bg-zinc-950/45 backdrop-blur-[1px] transition-opacity duration-300",
                       showFullscreenChat ? "opacity-100" : "pointer-events-none opacity-0"
                     )}
                     onClick={() => setShowFullscreenChat(false)}
@@ -1396,13 +1497,40 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
                             className="rounded-lg border border-zinc-800/90 bg-zinc-900/80 px-2.5 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.02)]"
                           >
                             <div className="mb-1 flex items-center justify-between">
-                              <span className="text-[10px] text-zinc-500">Sohbet</span>
+                              <span className="text-[10px] text-zinc-500">{message.senderId === user?.id ? "Sen" : "Üye"}</span>
                               <span className="text-[10px] text-zinc-500">{message.timeLabel}</span>
                             </div>
                             <p className="line-clamp-4 text-[11px] leading-relaxed text-zinc-200">{message.content}</p>
                           </div>
                         ))
                       )}
+                    </div>
+
+                    <div className="border-t border-zinc-800/90 bg-zinc-900/80 p-2.5">
+                      <div className="flex items-end gap-2">
+                        <textarea
+                          className="max-h-24 min-h-[2.5rem] flex-1 resize-none rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-2 text-xs text-zinc-100 outline-none placeholder:text-zinc-500 focus:border-cyan-700/70"
+                          onChange={(event) => setFullscreenChatDraft(event.target.value)}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter" && !event.shiftKey) {
+                              event.preventDefault();
+                              void sendFullscreenChatMessage();
+                            }
+                          }}
+                          placeholder="Mesaj yaz... (Enter gönderir)"
+                          value={fullscreenChatDraft}
+                        />
+                        <button
+                          className="inline-flex h-10 shrink-0 items-center justify-center rounded-lg border border-cyan-700/60 bg-cyan-600/20 px-3 text-xs font-medium text-cyan-100 transition-colors hover:bg-cyan-600/30 disabled:opacity-50"
+                          disabled={sendingFullscreenChat || fullscreenChatDraft.trim().length === 0}
+                          onClick={() => {
+                            void sendFullscreenChatMessage();
+                          }}
+                          type="button"
+                        >
+                          {sendingFullscreenChat ? "..." : "Gönder"}
+                        </button>
+                      </div>
                     </div>
                   </div>
                 </>
@@ -1482,6 +1610,20 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
               >
                 {isPlayerFullscreen ? <Minimize2 className="h-3 w-3" /> : <Maximize2 className="h-3 w-3" />}
                 {isPlayerFullscreen ? "Küçült" : "Büyüt"}
+              </button>
+              <button
+                className={cn(
+                  "inline-flex shrink-0 items-center gap-1 rounded-lg border px-2 py-1.5 text-[11px] transition-colors",
+                  isMiniPlayerMode
+                    ? "border-cyan-700/60 bg-cyan-600/20 text-cyan-100"
+                    : "border-zinc-700 bg-zinc-900 text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
+                )}
+                onClick={() => setIsMiniPlayerMode((prev) => !prev)}
+                title={isMiniPlayerMode ? "Mini pencereyi kapat" : "Mini pencere"}
+                type="button"
+              >
+                <PictureInPicture2 className="h-3 w-3" />
+                Mini
               </button>
             </div>
 
