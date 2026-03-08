@@ -14,6 +14,7 @@ import {
 } from "@/lib/watchParty";
 import { getSupabaseBrowserClient } from "@/lib/supabase/browser";
 import { cn } from "@/lib/utils";
+import { usePresence } from "@/components/Presence/PresenceProvider";
 import { useAuth } from "@/providers/AuthProvider";
 
 type MessageRow = {
@@ -58,7 +59,10 @@ function buildActorName(user: ReturnType<typeof useAuth>["user"]): string {
 
 function mapMessageInsertErrorMessage(message: string): string {
   if (/row-level security policy/i.test(message)) {
-    return "Bu konuşmaya Watch Party olayı yazma iznin yok ya da konuşmada engel ilişkisi var.";
+    return "Bu odada Watch Party kontrolü gönderemiyorsun. Odaya katıldığından ve engel durumu olmadığından emin ol.";
+  }
+  if (/not.*member|member/i.test(message)) {
+    return "Bu oda için yetkin bulunamadı. Önce odaya yeniden katılmayı dene.";
   }
   return message;
 }
@@ -163,6 +167,7 @@ interface WatchPartyProps {
 
 export function WatchParty({ conversationId, isGroupConversation, onNowPlayingChange }: WatchPartyProps) {
   const { user } = useAuth();
+  const { onlineUserIds } = usePresence();
   const supabase = getSupabaseBrowserClient();
 
   const [messages, setMessages] = useState<MessageRow[]>([]);
@@ -182,6 +187,10 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
   const [pausedPositionSec, setPausedPositionSec] = useState<number | null>(null);
 
   const [roomOwnerId, setRoomOwnerId] = useState<string | null>(null);
+  const [roomOwnerLabel, setRoomOwnerLabel] = useState<string | null>(null);
+  const [roomMemberIds, setRoomMemberIds] = useState<string[]>([]);
+  const [syncFeedback, setSyncFeedback] = useState<string | null>(null);
+  const [syncHealth, setSyncHealth] = useState<"good" | "lagging">("good");
 
   // Invite panel
   const [showInvitePanel, setShowInvitePanel] = useState(false);
@@ -202,11 +211,32 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
   const sharedMutedRef = useRef(false);
   const sharedPlaybackRateRef = useRef(1);
   const lastBroadcastSyncAtRef = useRef(0);
+  const syncFeedbackTimerRef = useRef<number | null>(null);
+  const lastSyncSuccessFeedbackAtRef = useRef(0);
 
   const actorName = buildActorName(user);
   const projection = useMemo(() => projectQueueFromMessages(messages), [messages]);
   const isRoomOwner = Boolean(user?.id && roomOwnerId && user.id === roomOwnerId);
   const currentVideoId = projection.currentVideo?.videoId ?? null;
+  const onlineMemberCount = useMemo(
+    () => roomMemberIds.filter((memberId) => onlineUserIds.has(memberId)).length,
+    [onlineUserIds, roomMemberIds]
+  );
+  const roomOwnerDisplay = useMemo(() => {
+    if (isRoomOwner) return "Sen";
+    return roomOwnerLabel ?? "Bilinmiyor";
+  }, [isRoomOwner, roomOwnerLabel]);
+
+  const pushSyncFeedback = useCallback((message: string) => {
+    setSyncFeedback(message);
+    if (syncFeedbackTimerRef.current !== null) {
+      window.clearTimeout(syncFeedbackTimerRef.current);
+    }
+    syncFeedbackTimerRef.current = window.setTimeout(() => {
+      setSyncFeedback(null);
+      syncFeedbackTimerRef.current = null;
+    }, 1800);
+  }, []);
 
   const sendYTCommand = useCallback((func: string, args?: unknown[]) => {
     const targetWindow = iframeRef.current?.contentWindow;
@@ -306,6 +336,7 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
         if (!activeVideoId || payload.videoId !== activeVideoId) return;
 
         lastBroadcastSyncAtRef.current = Date.now();
+        setSyncHealth("good");
 
         const paused = Boolean(payload.paused);
         const muted = Boolean(payload.muted);
@@ -328,8 +359,13 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
           ? Math.max(0, pausedPositionSecRef.current ?? 0)
           : Math.max(0, syncAnchorMsRef.current !== null ? (Date.now() - syncAnchorMsRef.current) / 1000 : 0);
 
-        if (Math.abs(incomingPosition - localExpected) > 0.25) {
+        const drift = incomingPosition - localExpected;
+        if (Math.abs(drift) > 0.25) {
           sendYTCommand("seekTo", [incomingPosition, true]);
+          pushSyncFeedback(`${Math.abs(drift).toFixed(1)} sn ${drift > 0 ? "ileri" : "geri"} alındı`);
+        } else if (Date.now() - lastSyncSuccessFeedbackAtRef.current > 12000) {
+          lastSyncSuccessFeedbackAtRef.current = Date.now();
+          pushSyncFeedback("Senkronize edildi");
         }
 
         if (paused) {
@@ -405,32 +441,89 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
       realtimeChannelRef.current = null;
       void supabase.removeChannel(channel);
     };
-  }, [conversationId, isGroupConversation, sendYTCommand, supabase, user]);
+  }, [conversationId, isGroupConversation, pushSyncFeedback, sendYTCommand, supabase, user]);
 
   useEffect(() => {
     let cancelled = false;
     if (!conversationId) {
       setRoomOwnerId(null);
+      setRoomOwnerLabel(null);
+      setRoomMemberIds([]);
       return;
     }
 
-    const loadOwner = async () => {
-      const { data } = await supabase
-        .from("conversations")
-        .select("owner_id")
-        .eq("id", conversationId)
+    const loadRoomMeta = async () => {
+      const [{ data: conversation }, { data: members }] = await Promise.all([
+        supabase.from("conversations").select("owner_id").eq("id", conversationId).maybeSingle(),
+        supabase.from("participants").select("user_id").eq("conversation_id", conversationId)
+      ]);
+
+      if (cancelled) return;
+
+      const ownerId = conversation?.owner_id ?? null;
+      setRoomOwnerId(ownerId);
+      setRoomMemberIds(((members as Array<{ user_id: string }> | null) ?? []).map((member) => member.user_id));
+
+      if (!ownerId) {
+        setRoomOwnerLabel(null);
+        return;
+      }
+
+      const { data: ownerProfile } = await supabase
+        .from("profiles")
+        .select("username, full_name")
+        .eq("id", ownerId)
         .maybeSingle();
 
-      if (!cancelled) {
-        setRoomOwnerId(data?.owner_id ?? null);
-      }
+      if (cancelled) return;
+
+      const label = ownerProfile?.username || ownerProfile?.full_name || "Oda sahibi";
+      setRoomOwnerLabel(label);
     };
 
-    void loadOwner();
+    void loadRoomMeta();
+
+    const memberChannel = supabase
+      .channel(`watch-party-members:${conversationId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "participants",
+          filter: `conversation_id=eq.${conversationId}`
+        },
+        () => {
+          void loadRoomMeta();
+        }
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "DELETE",
+          schema: "public",
+          table: "participants",
+          filter: `conversation_id=eq.${conversationId}`
+        },
+        () => {
+          void loadRoomMeta();
+        }
+      )
+      .subscribe();
+
     return () => {
       cancelled = true;
+      void supabase.removeChannel(memberChannel);
     };
   }, [conversationId, supabase]);
+
+  useEffect(() => {
+    return () => {
+      if (syncFeedbackTimerRef.current !== null) {
+        window.clearTimeout(syncFeedbackTimerRef.current);
+      }
+    };
+  }, []);
 
   const ensureCanInsertMessage = useCallback(async () => {
     if (!user || !conversationId) return false;
@@ -440,12 +533,12 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
     });
 
     if (memberError) {
-      setError(memberError.message || "Watch Party yetkisi doğrulanamadı.");
+      setError("Oda yetkisi doğrulanamadı. Lütfen tekrar dene.");
       return false;
     }
 
     if (!isMember) {
-      setError("Bu konuşmaya Watch Party olayı gönderemezsin.");
+      setError("Bu odada işlem yapabilmek için önce odaya katılmalısın.");
       return false;
     }
 
@@ -456,7 +549,7 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
     async (eventPayload: Omit<WatchPartyEventPayload, "schema" | "actorId" | "actorName" | "createdAt">) => {
       if (!user || !conversationId) return;
       if (!isRoomOwner) {
-        setError("Watch Party ortak kontrolleri sadece oda sahibi kullanabilir.");
+        setError("Bu kontrol sadece oda sahibinde. Oda sahibiyle devam edebilirsin.");
         return;
       }
       if (!(await ensureCanInsertMessage())) return;
@@ -537,6 +630,25 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
     const positionSec = Math.max(0, getSharedElapsed() + delta);
     void insertEvent({ action: "player_seek", video: projection.currentVideo ?? undefined, positionSec });
   }, [getSharedElapsed, insertEvent, projection.currentVideo]);
+
+  const resyncLocalPlayer = useCallback(() => {
+    const positionSec = Math.max(0, getSharedElapsed());
+    sendYTCommand("seekTo", [positionSec, true]);
+    sendYTCommand("setPlaybackRate", [sharedPlaybackRate]);
+    if (sharedMuted) {
+      sendYTCommand("setVolume", [0]);
+      sendYTCommand("mute");
+    } else {
+      sendYTCommand("setVolume", [100]);
+      sendYTCommand("unMute");
+    }
+    if (sharedPaused) {
+      sendYTCommand("pauseVideo");
+    } else {
+      sendYTCommand("playVideo");
+    }
+    pushSyncFeedback("Senkronize edildi");
+  }, [getSharedElapsed, pushSyncFeedback, sendYTCommand, sharedMuted, sharedPaused, sharedPlaybackRate]);
 
   const latestPlaybackEvent = useMemo(() => {
     if (!projection.currentVideo?.videoId) return null;
@@ -659,7 +771,11 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
     if (!projection.currentVideo || sharedPaused || isRoomOwner) return;
 
     const tick = () => {
-      if (Date.now() - lastBroadcastSyncAtRef.current < 1500) return;
+      if (Date.now() - lastBroadcastSyncAtRef.current < 1500) {
+        setSyncHealth("good");
+        return;
+      }
+      setSyncHealth("lagging");
       const expectedPos = getSharedElapsed();
       sendYTCommand("seekTo", [expectedPos, true]);
       sendYTCommand("setPlaybackRate", [sharedPlaybackRate]);
@@ -671,6 +787,7 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
         sendYTCommand("unMute");
       }
       sendYTCommand("playVideo");
+      pushSyncFeedback("Gecikme algılandı, senkron yenilendi");
     };
 
     tick();
@@ -678,7 +795,7 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
     return () => {
       window.clearInterval(interval);
     };
-  }, [getSharedElapsed, isRoomOwner, projection.currentVideo, sendYTCommand, sharedMuted, sharedPaused, sharedPlaybackRate]);
+  }, [getSharedElapsed, isRoomOwner, projection.currentVideo, pushSyncFeedback, sendYTCommand, sharedMuted, sharedPaused, sharedPlaybackRate]);
 
   // ── Invite helpers ────────────────────────────────────────────────────
   const inviteLink = typeof window !== "undefined"
@@ -774,14 +891,25 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
   }
 
   return (
-    <div className="flex h-full flex-col overflow-hidden bg-zinc-950">
+    <div className="relative flex h-full flex-col overflow-hidden bg-zinc-950">
       {/* ── Header ── */}
       <div className="flex shrink-0 items-center justify-between gap-3 border-b border-zinc-800 px-4 py-2.5">
         <div className="min-w-0 flex-1">
           <p className="text-sm font-semibold text-zinc-100">Watch Party</p>
-          <p className="text-[11px] text-zinc-500">
-            Kontrol: {isRoomOwner ? "Oda sahibi (sen)" : "Sadece oda sahibi"}
-          </p>
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px]">
+            <span className="rounded-full border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-zinc-300">Owner: {roomOwnerDisplay}</span>
+            <span className="rounded-full border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-zinc-300">İzleyen: {onlineMemberCount}/{roomMemberIds.length || 0}</span>
+            <span
+              className={cn(
+                "rounded-full border px-2 py-0.5",
+                syncHealth === "good"
+                  ? "border-emerald-700/60 bg-emerald-600/20 text-emerald-200"
+                  : "border-amber-700/60 bg-amber-600/20 text-amber-200"
+              )}
+            >
+              Senkron: {syncHealth === "good" ? "İyi" : "Gecikmeli"}
+            </span>
+          </div>
           {projection.pendingPrompts.length > 0 && (
             <p className="text-[11px] text-amber-400">
               {projection.pendingPrompts.length} bekleyen öneri
@@ -810,6 +938,12 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
         </button>
 
       </div>
+
+      {syncFeedback ? (
+        <div className="pointer-events-none absolute right-3 top-[58px] z-30 rounded-lg border border-cyan-700/60 bg-zinc-950/95 px-3 py-1.5 text-[11px] text-cyan-100 shadow-lg">
+          {syncFeedback}
+        </div>
+      ) : null}
 
       {/* ── Invite panel ── */}
       {showInvitePanel && (
@@ -957,9 +1091,13 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
               </a>
             </div>
 
-            {/* ── Shared playback controls (owner only) ── */}
-            <div className="flex flex-wrap items-center gap-1.5 border-t border-zinc-800/60 bg-zinc-950/80 px-3 py-2">
-              <span className="text-[10px] text-zinc-600 mr-1">Ortak Oynatma:</span>
+            {/* ── Owner controls ── */}
+            <div className="border-t border-zinc-800/60 bg-zinc-950/80 px-3 py-2">
+              <div className="mb-1 flex items-center justify-between">
+                <span className="text-[10px] font-semibold uppercase tracking-wide text-zinc-500">Owner Kontrolleri</span>
+                {!isRoomOwner ? <span className="text-[10px] text-zinc-600">Sadece owner kullanabilir</span> : null}
+              </div>
+              <div className="flex flex-wrap items-center gap-1.5">
 
               {/* Duraklat / Devam */}
               <button
@@ -1038,10 +1176,29 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
                 ))}
               </div>
             </div>
+            </div>
 
-            {/* ── Shared controls (herkesi etkiler) ── */}
-            <div className="flex flex-wrap items-center gap-1.5 border-t border-zinc-800/40 bg-zinc-950 px-3 py-2">
-              <span className="text-[10px] text-zinc-600 mr-1">Ortak:</span>
+            {/* ── Participant controls ── */}
+            <div className="border-t border-zinc-800/40 bg-zinc-950 px-3 py-2">
+              <div className="mb-1 flex items-center justify-between">
+                <span className="text-[10px] font-semibold uppercase tracking-wide text-zinc-500">Katılımcı Kontrolleri</span>
+                <span className="text-[10px] text-zinc-600">Kişisel senkron ve oda bilgisi</span>
+              </div>
+              <div className="mb-2 flex flex-wrap items-center gap-2">
+                <button
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs font-medium text-zinc-200 transition-colors hover:bg-zinc-800"
+                  onClick={resyncLocalPlayer}
+                  type="button"
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                  Yeniden Senkronla
+                </button>
+                <p className="text-[11px] text-zinc-500">
+                  {isRoomOwner ? "Owner olarak senkronu yayınlıyorsun." : "Kontroller owner'da, oynatıcı otomatik senkronlanır."}
+                </p>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-1.5">
 
               {/* Baştan */}
               <button
@@ -1118,6 +1275,7 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
                 <Trash2 className="h-3.5 w-3.5" />
                 <span className="hidden sm:inline">Temizle</span>
               </button>
+            </div>
             </div>
           </>
         ) : (

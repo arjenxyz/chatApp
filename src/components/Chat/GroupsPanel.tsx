@@ -11,6 +11,7 @@ type GroupRow = {
   id: string;
   name: string | null;
   owner_id: string | null;
+  is_watch_party_room: boolean;
   created_at: string;
 };
 
@@ -63,8 +64,10 @@ function sanitizePreview(value: string | null | undefined): string {
 }
 
 export function GroupsPanel({
+  mode = "group",
   onOpenConversation
 }: {
+  mode?: "group" | "watch-party";
   onOpenConversation?: (conversationId: string) => void;
 }) {
   const supabase = getSupabaseBrowserClient();
@@ -79,6 +82,7 @@ export function GroupsPanel({
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [createSuccess, setCreateSuccess] = useState<string | null>(null);
+  const isWatchPartyMode = mode === "watch-party";
 
   const refreshGroups = useCallback(async () => {
     if (!user) return;
@@ -108,8 +112,9 @@ export function GroupsPanel({
       await Promise.all([
         supabase
           .from("conversations")
-          .select("id, name, owner_id, created_at")
+          .select("id, name, owner_id, is_watch_party_room, created_at")
           .eq("is_group", true)
+          .eq("is_watch_party_room", isWatchPartyMode)
           .in("id", conversationIds)
           .order("created_at", { ascending: false }),
         supabase
@@ -163,7 +168,7 @@ export function GroupsPanel({
     nextGroups.sort((left, right) => new Date(right.lastMessageAt).getTime() - new Date(left.lastMessageAt).getTime());
     setGroups(nextGroups);
     setLoading(false);
-  }, [supabase, user]);
+  }, [isWatchPartyMode, supabase, user]);
 
   useEffect(() => {
     void refreshGroups();
@@ -353,6 +358,7 @@ export function GroupsPanel({
           id: conversationId,
           name: groupName,
           is_group: true,
+          is_watch_party_room: isWatchPartyMode,
           owner_id: user.id
         });
 
@@ -387,14 +393,14 @@ export function GroupsPanel({
 
       setCreateName("");
       setCreateMembersInput("");
-      setCreateSuccess("Grup oluşturuldu.");
+      setCreateSuccess(isWatchPartyMode ? "Watch Party odası oluşturuldu." : "Grup oluşturuldu.");
       window.setTimeout(() => setCreateSuccess(null), 2000);
       await refreshGroups();
       if (onOpenConversation) onOpenConversation(conversationId);
     } finally {
       setCreating(false);
     }
-  }, [createName, normalizedCreateMembers, onOpenConversation, refreshGroups, supabase, user]);
+  }, [createName, isWatchPartyMode, normalizedCreateMembers, onOpenConversation, refreshGroups, supabase, user]);
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto rounded-2xl border border-zinc-800 bg-zinc-900/45 p-4 md:p-6">
@@ -402,14 +408,14 @@ export function GroupsPanel({
         <div className="rounded-2xl border border-zinc-800 bg-zinc-900/70 p-4 md:p-5">
           <div className="mb-3 flex items-center gap-2">
             <Users className="h-4 w-4 text-zinc-300" />
-            <h3 className="text-sm font-semibold text-zinc-100">Yeni Grup Oluştur</h3>
+            <h3 className="text-sm font-semibold text-zinc-100">{isWatchPartyMode ? "Yeni Watch Party Odası Oluştur" : "Yeni Grup Oluştur"}</h3>
           </div>
 
           <div className="space-y-3">
             <input
               className="w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none placeholder:text-zinc-500 focus:border-zinc-700"
               onChange={(event) => setCreateName(event.target.value)}
-              placeholder="Grup adı"
+              placeholder={isWatchPartyMode ? "Watch Party oda adı" : "Grup adı"}
               value={createName}
             />
             <textarea
@@ -436,7 +442,7 @@ export function GroupsPanel({
                 type="button"
               >
                 {creating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
-                Grup Oluştur
+                {isWatchPartyMode ? "Watch Party Odası Oluştur" : "Grup Oluştur"}
               </button>
             </div>
           </div>
@@ -446,7 +452,7 @@ export function GroupsPanel({
         </div>
 
         <div className="flex items-center justify-between">
-          <h3 className="text-sm font-semibold text-zinc-200">Gruplarım ({groups.length})</h3>
+          <h3 className="text-sm font-semibold text-zinc-200">{isWatchPartyMode ? "Watch Party Odalarım" : "Gruplarım"} ({groups.length})</h3>
           <button
             className={cn(
               "inline-flex items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800",
@@ -468,8 +474,10 @@ export function GroupsPanel({
         ) : groups.length === 0 ? (
           <div className="rounded-2xl border border-zinc-800 bg-zinc-900/60 px-4 py-10 text-center">
             <Users className="mx-auto h-7 w-7 text-zinc-500" />
-            <p className="mt-3 text-sm text-zinc-300">Henüz grup yok.</p>
-            <p className="mt-1 text-xs text-zinc-500">Yukarıdaki form ile ilk grubunu oluşturabilirsin.</p>
+            <p className="mt-3 text-sm text-zinc-300">{isWatchPartyMode ? "Henüz Watch Party odası yok." : "Henüz grup yok."}</p>
+            <p className="mt-1 text-xs text-zinc-500">
+              {isWatchPartyMode ? "Yukarıdaki form ile ilk Watch Party odanı oluşturabilirsin." : "Yukarıdaki form ile ilk grubunu oluşturabilirsin."}
+            </p>
           </div>
         ) : (
           <ul className="grid gap-2 md:grid-cols-2 2xl:grid-cols-3">

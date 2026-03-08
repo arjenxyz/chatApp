@@ -244,10 +244,19 @@ function mapMessageInsertErrorMessage(message: string): string {
 const linkify = new LinkifyIt();
 const WP_INVITE_REGEX = /^\[\[WP_INVITE:([0-9a-f-]{36})\]\]$/;
 const PHONE_REGEX = /\+?\d[\d\s\-]{6,}\d/g;
+const YOUTUBE_DOMAIN_REGEX = /(^|\.)youtube\.com$|(^|\.)youtu\.be$/i;
 
 type LinkSegment = {
   text: string;
   href?: string;
+};
+
+type LinkPreviewData = {
+  url: string;
+  title: string;
+  image: string | null;
+  siteName: string | null;
+  domain: string;
 };
 
 type EmojiCategory = {
@@ -361,6 +370,28 @@ function renderLinkifiedText(text: string) {
   });
 }
 
+function extractPreviewUrlFromText(text: string): string | null {
+  if (!text) return null;
+
+  const matches = linkify.match(text) ?? [];
+  const externalUrls = matches.filter((match) => /^https?:\/\//i.test(match.url));
+  if (externalUrls.length === 0 || externalUrls.length > 3) return null;
+
+  for (const match of externalUrls) {
+    try {
+      const parsed = new URL(match.url);
+      if (YOUTUBE_DOMAIN_REGEX.test(parsed.hostname.toLowerCase())) {
+        continue;
+      }
+      return parsed.toString();
+    } catch {
+      continue;
+    }
+  }
+
+  return null;
+}
+
 function formatDateLabel(dateIso: string): string {
   const date = new Date(dateIso);
   return date.toLocaleDateString("tr-TR", {
@@ -458,6 +489,7 @@ export function ChatWindow({
   const [groupNameSaving, setGroupNameSaving] = useState(false);
   const [groupMemberBusyId, setGroupMemberBusyId] = useState<string | null>(null);
   const [groupOwnerTransferBusy, setGroupOwnerTransferBusy] = useState(false);
+  const [linkPreviewByUrl, setLinkPreviewByUrl] = useState<Record<string, LinkPreviewData | null>>({});
 
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -480,6 +512,7 @@ export function ChatWindow({
   const stickerUploadInputRef = useRef<HTMLInputElement | null>(null);
   const previousMessageCountRef = useRef(0);
   const lastBotRequestAtRef = useRef(0);
+  const pendingLinkPreviewUrlsRef = useRef<Set<string>>(new Set());
 
   const trimmedText = text.trim();
   const blockedByOther = blockStatus === "blockedByOther";
@@ -628,6 +661,60 @@ export function ChatWindow({
     });
     return decisions;
   }, [messages]);
+
+  useEffect(() => {
+    setLinkPreviewByUrl({});
+    pendingLinkPreviewUrlsRef.current.clear();
+  }, [conversationId]);
+
+  useEffect(() => {
+    const candidates = new Set<string>();
+
+    messages.forEach((message) => {
+      if (message.deleted || !message.content) return;
+      if (isBotMessageContent(message.content)) return;
+      if (WP_INVITE_REGEX.test(message.content)) return;
+
+      const previewUrl = extractPreviewUrlFromText(message.content);
+      if (!previewUrl || previewUrl.length > 2048) return;
+      candidates.add(previewUrl);
+    });
+
+    const queue = Array.from(candidates).filter(
+      (url) => !(url in linkPreviewByUrl) && !pendingLinkPreviewUrlsRef.current.has(url)
+    );
+
+    if (queue.length === 0) return;
+
+    queue.slice(0, 10).forEach((url) => {
+      pendingLinkPreviewUrlsRef.current.add(url);
+
+      void (async () => {
+        try {
+          const response = await fetch("/api/link-preview", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ url })
+          });
+
+          if (!response.ok) {
+            setLinkPreviewByUrl((prev) => ({ ...prev, [url]: null }));
+            return;
+          }
+
+          const payload = (await response.json()) as { preview?: LinkPreviewData };
+          setLinkPreviewByUrl((prev) => ({
+            ...prev,
+            [url]: payload.preview ?? null
+          }));
+        } catch {
+          setLinkPreviewByUrl((prev) => ({ ...prev, [url]: null }));
+        } finally {
+          pendingLinkPreviewUrlsRef.current.delete(url);
+        }
+      })();
+    });
+  }, [linkPreviewByUrl, messages]);
 
   useEffect(() => {
     if (typingUserIds.length === 0) {
@@ -2939,6 +3026,11 @@ export function ChatWindow({
                 : hasInstallCta
                 ? stripInstallCtaMarker(rawDisplayContent)
                 : rawDisplayContent;
+              const previewUrl =
+                !botMessage && !message.deleted && !WP_INVITE_REGEX.test(message.content)
+                  ? extractPreviewUrlFromText(displayContent)
+                  : null;
+              const preview = previewUrl ? linkPreviewByUrl[previewUrl] : undefined;
               const promptDecision =
                 parsedWatchParty?.kind === "prompt"
                   ? watchPartyDecisionBySuggestionId.get(parsedWatchParty.payload.suggestionId)
@@ -3135,12 +3227,40 @@ export function ChatWindow({
                               );
                             })()
                           ) : (
-                            <p className="whitespace-pre-wrap break-words">
-                              {renderLinkifiedText(displayContent)}
-                              {message.edited && !message.deleted ? (
-                                <span className="ml-1 text-[10px] text-zinc-400">(düzenlendi)</span>
+                            <div className="space-y-2">
+                              <p className="whitespace-pre-wrap break-words">
+                                {renderLinkifiedText(displayContent)}
+                                {message.edited && !message.deleted ? (
+                                  <span className="ml-1 text-[10px] text-zinc-400">(düzenlendi)</span>
+                                ) : null}
+                              </p>
+
+                              {previewUrl && preview ? (
+                                <a
+                                  className="block overflow-hidden rounded-xl border border-zinc-700/80 bg-zinc-950/70 transition-colors hover:border-zinc-600"
+                                  href={preview.url}
+                                  rel="noreferrer"
+                                  target="_blank"
+                                >
+                                  {preview.image ? (
+                                    <div
+                                      aria-label={preview.title}
+                                      className="h-36 w-full bg-cover bg-center"
+                                      role="img"
+                                      style={{ backgroundImage: `url(${preview.image})` }}
+                                    />
+                                  ) : null}
+                                  <div className="space-y-1 px-3 py-2">
+                                    <p className="line-clamp-2 text-xs font-semibold text-zinc-100">{preview.title}</p>
+                                    <p className="text-[11px] text-zinc-400">{preview.siteName || preview.domain}</p>
+                                  </div>
+                                </a>
+                              ) : previewUrl && preview === undefined ? (
+                                <div className="rounded-lg border border-zinc-700/80 bg-zinc-950/50 px-3 py-2">
+                                  <p className="text-[11px] text-zinc-500">Link önizleme hazırlanıyor...</p>
+                                </div>
                               ) : null}
-                            </p>
+                            </div>
                           )}
 
                           {hasInstallCta ? (

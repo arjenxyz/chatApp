@@ -41,7 +41,7 @@ export async function POST(request: NextRequest) {
 
     const { data: conversation, error: conversationError } = await admin
       .from("conversations")
-      .select("id, is_group, owner_id")
+      .select("id, is_group, is_watch_party_room, owner_id")
       .eq("id", conversationId)
       .maybeSingle();
 
@@ -55,6 +55,10 @@ export async function POST(request: NextRequest) {
 
     if (!conversation.is_group) {
       return NextResponse.json({ error: "Bu davet bir grup odasına ait değil." }, { status: 400 });
+    }
+
+    if (!conversation.is_watch_party_room) {
+      return NextResponse.json({ error: "Bu davet bir Watch Party odasına ait değil." }, { status: 400 });
     }
 
     const { data: existingMembership, error: membershipError } = await admin

@@ -1,6 +1,6 @@
 "use client";
 
-import { BellRing, CloudOff, MessageCircle, Settings as SettingsIcon, UserRoundPlus, Users, X, Film } from "lucide-react";
+import { ArrowLeft, BellRing, CloudOff, MessageCircle, Settings as SettingsIcon, UserRoundPlus, Users, X, Film } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 
@@ -55,6 +55,14 @@ function base64UrlToArrayBuffer(value: string): ArrayBuffer {
   return output.buffer;
 }
 
+function mapWatchPartyJoinErrorMessage(message: string): string {
+  if (/arkadaş/i.test(message)) return "Odaya katılmak için önce owner ile arkadaş olmalısın.";
+  if (/watch party odasına ait değil/i.test(message)) return "Bu davet bir Watch Party odasına ait değil.";
+  if (/yetkisiz|oturum/i.test(message)) return "Oturum doğrulanamadı. Lütfen tekrar giriş yap.";
+  if (/bulunamadı/i.test(message)) return "Bu Watch Party odası artık bulunamıyor.";
+  return message;
+}
+
 export function ChatShell() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -88,6 +96,7 @@ export function ChatShell() {
         id: conversationId,
         name: roomName,
         is_group: true,
+        is_watch_party_room: true,
         owner_id: user.id,
       });
       if (convError) throw convError;
@@ -96,6 +105,7 @@ export function ChatShell() {
         user_id: user.id,
       });
       if (partError) throw partError;
+      setWatchPartyPickMode(false);
       setSelectedConversationId(conversationId);
     } catch (err) {
       console.error("[wp] oda oluşturulamadı:", err);
@@ -355,7 +365,7 @@ export function ChatShell() {
         let message = "Watch Party odasına katılınamadı.";
         try {
           const body = (await response.json()) as { error?: string };
-          if (body?.error) message = body.error;
+          if (body?.error) message = mapWatchPartyJoinErrorMessage(body.error);
         } catch {
           // fallback to default message
         }
@@ -368,6 +378,7 @@ export function ChatShell() {
   );
 
   const finalizeWatchPartyJoin = useCallback((conversationId: string) => {
+    setWatchPartyPickMode(false);
     setSelectedConversationId(conversationId);
     setActiveTab("watch-party");
     setWpBannerDismissed(true);
@@ -1048,34 +1059,39 @@ export function ChatShell() {
 
               {/* Watch-party empty state */}
               {activeTab === "watch-party" && !selectedConversationId && (
-                <div className="flex h-full flex-col items-center justify-center gap-5 px-8 text-center">
-                  <div className="flex h-16 w-16 items-center justify-center rounded-full border border-zinc-700 bg-zinc-900">
-                    <Film className="h-7 w-7 text-zinc-400" />
-                  </div>
-                  <div>
-                    <p className="text-sm font-semibold text-zinc-200">Watch Party Odası Yok</p>
-                    <p className="mt-1 text-xs text-zinc-500">Özel bir oda oluştur veya mevcut bir grup sohbeti seç.</p>
-                  </div>
-                  <button
-                    className="inline-flex items-center gap-2 rounded-xl border border-cyan-700/60 bg-cyan-600/20 px-5 py-2.5 text-sm font-semibold text-cyan-100 transition-colors hover:bg-cyan-600/30 disabled:opacity-50"
-                    disabled={wpRoomCreating}
-                    onClick={() => void createWatchPartyRoom()}
-                    type="button"
-                  >
-                    <Film className="h-4 w-4" />
-                    {wpRoomCreating ? "Oluşturuluyor..." : "Oda Oluştur"}
-                  </button>
-                  <button
-                    className="text-xs text-zinc-500 underline underline-offset-2 hover:text-zinc-300"
-                    onClick={() => {
-                      setWatchPartyPickMode(true);
-                      setActiveTab("groups");
+                watchPartyPickMode ? (
+                  <GroupsPanel
+                    mode="watch-party"
+                    onOpenConversation={(conversationId) => {
+                      setSelectedConversationId(conversationId);
+                      syncConversationInUrl(conversationId);
+                      setWatchPartyPickMode(false);
+                      setActiveTab("watch-party");
                     }}
-                    type="button"
-                  >
-                    Mevcut grup sohbeti seç
-                  </button>
-                </div>
+                  />
+                ) : (
+                  <div className="flex h-full flex-col items-center justify-center gap-3 px-8 text-center">
+                    <p className="text-sm font-semibold text-zinc-200">Watch Party Odası Yok</p>
+                    <button
+                      className="inline-flex items-center gap-2 rounded-xl border border-cyan-700/60 bg-cyan-600/20 px-5 py-2.5 text-sm font-semibold text-cyan-100 transition-colors hover:bg-cyan-600/30 disabled:opacity-50"
+                      disabled={wpRoomCreating}
+                      onClick={() => void createWatchPartyRoom()}
+                      type="button"
+                    >
+                      <Film className="h-4 w-4" />
+                      {wpRoomCreating ? "Oluşturuluyor..." : "Oda Oluştur"}
+                    </button>
+                    <button
+                      className="text-xs text-zinc-500 underline underline-offset-2 hover:text-zinc-300"
+                      onClick={() => {
+                        setWatchPartyPickMode(true);
+                      }}
+                      type="button"
+                    >
+                      Mevcut Watch Party odası seç
+                    </button>
+                  </div>
+                )
               )}
 
               {/* Other tabs */}
@@ -1104,11 +1120,6 @@ export function ChatShell() {
                   onOpenConversation={(conversationId) => {
                     setSelectedConversationId(conversationId);
                     syncConversationInUrl(conversationId);
-                    if (watchPartyPickMode) {
-                      setWatchPartyPickMode(false);
-                      setActiveTab("watch-party");
-                      return;
-                    }
                     setActiveTab("conversations");
                   }}
                 />
@@ -1169,11 +1180,6 @@ export function ChatShell() {
                 onOpenConversation={(conversationId) => {
                   setSelectedConversationId(conversationId);
                   syncConversationInUrl(conversationId);
-                  if (watchPartyPickMode) {
-                    setWatchPartyPickMode(false);
-                    setActiveTab("watch-party");
-                    return;
-                  }
                   setActiveTab("conversations");
                 }}
               />
@@ -1196,7 +1202,7 @@ export function ChatShell() {
               selectedConversationId ? (
                 <section
                   className={cn(
-                    "flex min-h-0 flex-col overflow-hidden",
+                    "flex min-h-0 touch-pan-y flex-col overflow-hidden overscroll-y-contain",
                     isPWA ? "bg-zinc-950" : "rounded-2xl border border-zinc-800 bg-zinc-900/45"
                   )}
                 >
@@ -1206,7 +1212,7 @@ export function ChatShell() {
                       className={cn(
                         "flex-1 py-2.5 text-xs font-semibold transition-colors",
                         watchPartyMobilePane === "video"
-                          ? "border-b-2 border-cyan-500 text-cyan-300"
+                          ? "border-b-2 border-cyan-400 bg-cyan-600/15 text-cyan-100"
                           : "text-zinc-400 hover:text-zinc-200"
                       )}
                       onClick={() => setWatchPartyMobilePane("video")}
@@ -1218,7 +1224,7 @@ export function ChatShell() {
                       className={cn(
                         "flex-1 py-2.5 text-xs font-semibold transition-colors",
                         watchPartyMobilePane === "chat"
-                          ? "border-b-2 border-cyan-500 text-cyan-300"
+                          ? "border-b-2 border-cyan-400 bg-cyan-600/15 text-cyan-100"
                           : "text-zinc-400 hover:text-zinc-200"
                       )}
                       onClick={() => setWatchPartyMobilePane("chat")}
@@ -1230,7 +1236,7 @@ export function ChatShell() {
 
                   <div className="min-h-0 flex-1 overflow-hidden">
                     {/* Always-mounted WatchParty — hidden (not unmounted) when on chat pane */}
-                    <div className={cn("h-full", watchPartyMobilePane !== "video" && "hidden")}>
+                    <div className={cn("h-full overscroll-y-contain", watchPartyMobilePane !== "video" && "hidden")}>
                       <WatchParty
                         conversationId={selectedConversationId}
                         isGroupConversation={true}
@@ -1238,51 +1244,68 @@ export function ChatShell() {
                       />
                     </div>
                     {watchPartyMobilePane === "chat" && (
-                      <ChatWindow
-                        conversationId={selectedConversationId}
-                        networkOnline={isNetworkOnline}
-                        canInlineInstall={Boolean(installPromptEvent)}
-                        watchPartyMode
-                        onInlineInstall={handleInlineInstallFromDm}
-                        onBack={() => setWatchPartyMobilePane("video")}
-                        onLeaveConversation={() => {
-                          setSelectedConversationId(null);
-                          syncConversationInUrl(null);
-                          setActiveTab("conversations");
-                        }}
-                      />
+                      <div className="flex h-full min-h-0 touch-pan-y flex-col overflow-hidden overscroll-y-contain">
+                        <button
+                          className="inline-flex shrink-0 items-center justify-center gap-2 border-b border-zinc-800 bg-zinc-900/70 px-4 py-2 text-xs font-semibold text-cyan-200 hover:bg-zinc-900"
+                          onClick={() => setWatchPartyMobilePane("video")}
+                          type="button"
+                        >
+                          <ArrowLeft className="h-3.5 w-3.5" />
+                          Videoya dön
+                        </button>
+                        <div className="min-h-0 flex-1 overflow-hidden">
+                          <ChatWindow
+                            conversationId={selectedConversationId}
+                            networkOnline={isNetworkOnline}
+                            canInlineInstall={Boolean(installPromptEvent)}
+                            watchPartyMode
+                            onInlineInstall={handleInlineInstallFromDm}
+                            onBack={() => setWatchPartyMobilePane("video")}
+                            onLeaveConversation={() => {
+                              setSelectedConversationId(null);
+                              syncConversationInUrl(null);
+                              setActiveTab("conversations");
+                            }}
+                          />
+                        </div>
+                      </div>
                     )}
                   </div>
                 </section>
               ) : (
-                <div className="flex min-h-0 flex-col items-center justify-center gap-5 px-8 text-center">
-                  <div className="flex h-16 w-16 items-center justify-center rounded-full border border-zinc-700 bg-zinc-900">
-                    <Film className="h-7 w-7 text-zinc-400" />
-                  </div>
-                  <div>
-                    <p className="text-sm font-semibold text-zinc-200">Watch Party Odası Yok</p>
-                    <p className="mt-1 text-xs text-zinc-500">Özel bir oda oluştur veya mevcut bir grup sohbeti seç.</p>
-                  </div>
-                  <button
-                    className="inline-flex items-center gap-2 rounded-xl border border-cyan-700/60 bg-cyan-600/20 px-5 py-2.5 text-sm font-semibold text-cyan-100 transition-colors hover:bg-cyan-600/30 disabled:opacity-50"
-                    disabled={wpRoomCreating}
-                    onClick={() => void createWatchPartyRoom()}
-                    type="button"
-                  >
-                    <Film className="h-4 w-4" />
-                    {wpRoomCreating ? "Oluşturuluyor..." : "Oda Oluştur"}
-                  </button>
-                  <button
-                    className="text-xs text-zinc-500 underline underline-offset-2 hover:text-zinc-300"
-                    onClick={() => {
-                      setWatchPartyPickMode(true);
-                      setActiveTab("groups");
+                watchPartyPickMode ? (
+                  <GroupsPanel
+                    mode="watch-party"
+                    onOpenConversation={(conversationId) => {
+                      setSelectedConversationId(conversationId);
+                      syncConversationInUrl(conversationId);
+                      setWatchPartyPickMode(false);
+                      setActiveTab("watch-party");
                     }}
-                    type="button"
-                  >
-                    Mevcut grup sohbeti seç
-                  </button>
-                </div>
+                  />
+                ) : (
+                  <div className="flex min-h-0 flex-col items-center justify-center gap-3 px-8 text-center">
+                    <p className="text-sm font-semibold text-zinc-200">Watch Party Odası Yok</p>
+                    <button
+                      className="inline-flex items-center gap-2 rounded-xl border border-cyan-700/60 bg-cyan-600/20 px-5 py-2.5 text-sm font-semibold text-cyan-100 transition-colors hover:bg-cyan-600/30 disabled:opacity-50"
+                      disabled={wpRoomCreating}
+                      onClick={() => void createWatchPartyRoom()}
+                      type="button"
+                    >
+                      <Film className="h-4 w-4" />
+                      {wpRoomCreating ? "Oluşturuluyor..." : "Oda Oluştur"}
+                    </button>
+                    <button
+                      className="text-xs text-zinc-500 underline underline-offset-2 hover:text-zinc-300"
+                      onClick={() => {
+                        setWatchPartyPickMode(true);
+                      }}
+                      type="button"
+                    >
+                      Mevcut Watch Party odası seç
+                    </button>
+                  </div>
+                )
               )
             )}
           </>

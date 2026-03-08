@@ -22,6 +22,7 @@ type ConversationRow = {
   id: string;
   name: string | null;
   is_group: boolean;
+  is_watch_party_room: boolean;
   created_at: string;
 };
 
@@ -147,8 +148,9 @@ export function ConversationList({
       conversationIds.length > 0
         ? supabase
             .from("conversations")
-            .select("id, name, is_group, created_at")
+            .select("id, name, is_group, is_watch_party_room, created_at")
             .in("id", conversationIds)
+            .eq("is_watch_party_room", false)
             .order("created_at", { ascending: false })
         : Promise.resolve({ data: [], error: null }),
       conversationIds.length > 0
