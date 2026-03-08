@@ -1037,7 +1037,7 @@ export function ChatShell() {
                         const base = watchPartyDragRef.current.startWidth + delta;
 
                         // enforce minimum chat width (280px) and a max that keeps video ~75% of screen
-                        const maxWidth = Math.round(window.innerWidth * 0.75);
+                        const maxWidth = Math.round(window.innerWidth * 0.68);
                         setWatchPartyWidth(Math.max(280, Math.min(maxWidth, base)));
                       };
                       const onUp = () => {

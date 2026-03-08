@@ -1,7 +1,7 @@
 "use client";
 
 import type { RealtimeChannel } from "@supabase/supabase-js";
-import { Check, ChevronDown, ChevronUp, Copy, ExternalLink, FastForward, Gauge, Link2, ListVideo, Maximize2, MessageCircle, Minimize2, MoreHorizontal, Pause, PictureInPicture2, Play, Rewind, RotateCcw, RotateCw, SkipBack, SkipForward, StopCircle, Trash2, UserPlus, X } from "lucide-react";
+import { Check, ChevronDown, ChevronUp, Copy, ExternalLink, FastForward, Gauge, Link2, ListVideo, Maximize2, MessageCircle, Minimize2, MoreHorizontal, Pause, Play, Rewind, RotateCcw, RotateCw, SkipBack, SkipForward, StopCircle, Trash2, UserPlus, X } from "lucide-react";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { WatchPartyTerms } from "./WatchPartyTerms";
@@ -15,7 +15,6 @@ import {
 import { mapUserFacingError } from "@/lib/errorMessages";
 import { getSupabaseBrowserClient } from "@/lib/supabase/browser";
 import { cn } from "@/lib/utils";
-import { usePresence } from "@/components/Presence/PresenceProvider";
 import { useAuth } from "@/providers/AuthProvider";
 
 type MessageRow = {
@@ -198,7 +197,6 @@ interface WatchPartyProps {
 
 export function WatchParty({ conversationId, isGroupConversation, onNowPlayingChange }: WatchPartyProps) {
   const { user } = useAuth();
-  const { onlineUserIds } = usePresence();
   const supabase = getSupabaseBrowserClient();
 
   const [messages, setMessages] = useState<MessageRow[]>([]);
@@ -218,19 +216,15 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
   const [pausedPositionSec, setPausedPositionSec] = useState<number | null>(null);
 
   const [roomOwnerId, setRoomOwnerId] = useState<string | null>(null);
-  const [roomOwnerLabel, setRoomOwnerLabel] = useState<string | null>(null);
-  const [roomMemberIds, setRoomMemberIds] = useState<string[]>([]);
   const [syncFeedback, setSyncFeedback] = useState<string | null>(null);
-  const [syncHealth, setSyncHealth] = useState<"good" | "lagging">("good");
   const [isPlayerFullscreen, setIsPlayerFullscreen] = useState(false);
   const [selectedPlaybackQuality, setSelectedPlaybackQuality] = useState<PlayerQuality>("auto");
   const [showFullscreenOverlay, setShowFullscreenOverlay] = useState(false);
   const [showFullscreenChat, setShowFullscreenChat] = useState(false);
-  const [isMiniPlayerMode, setIsMiniPlayerMode] = useState(false);
-  const [miniPlayerWidth, setMiniPlayerWidth] = useState(320);
   const [fullscreenChatDraft, setFullscreenChatDraft] = useState("");
   const [sendingFullscreenChat, setSendingFullscreenChat] = useState(false);
   const [showMorePlayerControls, setShowMorePlayerControls] = useState(false);
+  const [ownerReportedPaused, setOwnerReportedPaused] = useState(false);
 
   // Invite panel
   const [showInvitePanel, setShowInvitePanel] = useState(false);
@@ -258,26 +252,16 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
   const fullscreenOverlayTimerRef = useRef<number | null>(null);
   const lastOverlayRevealAtRef = useRef(0);
   const showFullscreenOverlayRef = useRef(false);
-  const miniResizeStartXRef = useRef(0);
-  const miniResizeStartWidthRef = useRef(320);
-  const isMiniResizingRef = useRef(false);
 
   const actorName = buildActorName(user);
   const projection = useMemo(() => projectQueueFromMessages(messages), [messages]);
   const isRoomOwner = Boolean(user?.id && roomOwnerId && user.id === roomOwnerId);
   const currentVideoId = projection.currentVideo?.videoId ?? null;
-  const onlineMemberCount = useMemo(
-    () => roomMemberIds.filter((memberId) => onlineUserIds.has(memberId)).length,
-    [onlineUserIds, roomMemberIds]
-  );
-  const roomOwnerDisplay = useMemo(() => {
-    if (isRoomOwner) return "Sen";
-    return roomOwnerLabel ?? "Bilinmiyor";
-  }, [isRoomOwner, roomOwnerLabel]);
   const previousVideo = useMemo(() => {
     if (projection.playedHistory.length === 0) return null;
     return projection.playedHistory[projection.playedHistory.length - 1] ?? null;
   }, [projection.playedHistory]);
+  const isPauseUiState = isRoomOwner ? sharedPaused : ownerReportedPaused;
   const fullscreenChatMessages = useMemo(() => {
     return messages
       .filter((message) => !message.deleted && !isBotMessage(message.content))
@@ -353,6 +337,7 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
       setSyncAnchorMs(null);
     }
     setSharedPaused(false);
+    setOwnerReportedPaused(false);
     setPausedPositionSec(null);
     setSharedMuted(false);
     setSharedPlaybackRate(1);
@@ -368,9 +353,6 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
       setShowFullscreenOverlay(nextFullscreen);
       if (!nextFullscreen) {
         setShowFullscreenChat(false);
-        if (currentVideoIdRef.current && window.matchMedia("(max-width: 768px)").matches) {
-          setIsMiniPlayerMode(true);
-        }
         try {
           screen.orientation?.unlock?.();
         } catch {
@@ -414,10 +396,6 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
       }
     };
   }, []);
-
-  useEffect(() => {
-    setIsMiniPlayerMode(false);
-  }, [projection.currentVideo?.videoId]);
 
   useEffect(() => {
     if (!user || !conversationId || !isGroupConversation) {
@@ -474,9 +452,9 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
         if (!activeVideoId || payload.videoId !== activeVideoId) return;
 
         lastBroadcastSyncAtRef.current = Date.now();
-        setSyncHealth("good");
 
         const paused = Boolean(payload.paused);
+        setOwnerReportedPaused(paused);
         const muted = Boolean(payload.muted);
         const playbackRate =
           typeof payload.playbackRate === "number" && Number.isFinite(payload.playbackRate)
@@ -593,73 +571,25 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
     let cancelled = false;
     if (!conversationId) {
       setRoomOwnerId(null);
-      setRoomOwnerLabel(null);
-      setRoomMemberIds([]);
       return;
     }
 
-    const loadRoomMeta = async () => {
-      const [{ data: conversation }, { data: members }] = await Promise.all([
-        supabase.from("conversations").select("owner_id").eq("id", conversationId).maybeSingle(),
-        supabase.from("participants").select("user_id").eq("conversation_id", conversationId)
-      ]);
-
-      if (cancelled) return;
-
-      const ownerId = conversation?.owner_id ?? null;
-      setRoomOwnerId(ownerId);
-      setRoomMemberIds(((members as Array<{ user_id: string }> | null) ?? []).map((member) => member.user_id));
-
-      if (!ownerId) {
-        setRoomOwnerLabel(null);
-        return;
-      }
-
-      const { data: ownerProfile } = await supabase
-        .from("profiles")
-        .select("username, full_name")
-        .eq("id", ownerId)
+    const loadRoomOwner = async () => {
+      const { data: conversation } = await supabase
+        .from("conversations")
+        .select("owner_id")
+        .eq("id", conversationId)
         .maybeSingle();
 
       if (cancelled) return;
 
-      const label = ownerProfile?.username || ownerProfile?.full_name || "Oda sahibi";
-      setRoomOwnerLabel(label);
+      setRoomOwnerId(conversation?.owner_id ?? null);
     };
 
-    void loadRoomMeta();
-
-    const memberChannel = supabase
-      .channel(`watch-party-members:${conversationId}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "participants",
-          filter: `conversation_id=eq.${conversationId}`
-        },
-        () => {
-          void loadRoomMeta();
-        }
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "DELETE",
-          schema: "public",
-          table: "participants",
-          filter: `conversation_id=eq.${conversationId}`
-        },
-        () => {
-          void loadRoomMeta();
-        }
-      )
-      .subscribe();
+    void loadRoomOwner();
 
     return () => {
       cancelled = true;
-      void supabase.removeChannel(memberChannel);
     };
   }, [conversationId, supabase]);
 
@@ -925,46 +855,6 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
     }
   }, [isPlayerFullscreen, pushSyncFeedback]);
 
-  const clampMiniWidth = useCallback((width: number) => {
-    const viewportWidth = typeof window === "undefined" ? 1200 : window.innerWidth;
-    const minWidth = 220;
-    const maxWidth = Math.max(280, Math.floor(viewportWidth * 0.9));
-    return Math.min(maxWidth, Math.max(minWidth, Math.round(width)));
-  }, []);
-
-  const startMiniResize = useCallback((event: React.MouseEvent<HTMLButtonElement>) => {
-    if (!isMiniPlayerMode || isPlayerFullscreen) return;
-    event.preventDefault();
-    event.stopPropagation();
-    isMiniResizingRef.current = true;
-    miniResizeStartXRef.current = event.clientX;
-    miniResizeStartWidthRef.current = miniPlayerWidth;
-    document.body.style.userSelect = "none";
-  }, [isMiniPlayerMode, isPlayerFullscreen, miniPlayerWidth]);
-
-  useEffect(() => {
-    const onMouseMove = (event: MouseEvent) => {
-      if (!isMiniResizingRef.current) return;
-      const deltaX = event.clientX - miniResizeStartXRef.current;
-      const nextWidth = clampMiniWidth(miniResizeStartWidthRef.current + deltaX);
-      setMiniPlayerWidth(nextWidth);
-    };
-
-    const stopResize = () => {
-      if (!isMiniResizingRef.current) return;
-      isMiniResizingRef.current = false;
-      document.body.style.userSelect = "";
-    };
-
-    window.addEventListener("mousemove", onMouseMove);
-    window.addEventListener("mouseup", stopResize);
-
-    return () => {
-      window.removeEventListener("mousemove", onMouseMove);
-      window.removeEventListener("mouseup", stopResize);
-      document.body.style.userSelect = "";
-    };
-  }, [clampMiniWidth]);
 
   const latestPlaybackEvent = useMemo(() => {
     if (!projection.currentVideo?.videoId) return null;
@@ -1089,10 +979,8 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
 
     const tick = () => {
       if (Date.now() - lastBroadcastSyncAtRef.current < 1500) {
-        setSyncHealth("good");
         return;
       }
-      setSyncHealth("lagging");
       const expectedPos = getSharedElapsed();
       sendYTCommand("seekTo", [expectedPos, true]);
       sendYTCommand("setPlaybackRate", [sharedPlaybackRate]);
@@ -1213,20 +1101,6 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
       <div className="flex shrink-0 items-center justify-between gap-3 border-b border-zinc-800 px-4 py-2.5">
         <div className="min-w-0 flex-1">
           <p className="text-sm font-semibold text-zinc-100">Watch Party</p>
-          <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px]">
-            <span className="rounded-full border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-zinc-300">Owner: {roomOwnerDisplay}</span>
-            <span className="rounded-full border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-zinc-300">İzleyen: {onlineMemberCount}/{roomMemberIds.length || 0}</span>
-            <span
-              className={cn(
-                "rounded-full border px-2 py-0.5",
-                syncHealth === "good"
-                  ? "border-emerald-700/60 bg-emerald-600/20 text-emerald-200"
-                  : "border-amber-700/60 bg-amber-600/20 text-amber-200"
-              )}
-            >
-              Senkron: {syncHealth === "good" ? "İyi" : "Gecikmeli"}
-            </span>
-          </div>
           {projection.pendingPrompts.length > 0 && (
             <p className="text-[11px] text-amber-400">
               {projection.pendingPrompts.length} bekleyen öneri
@@ -1375,15 +1249,7 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
             {/* Iframe wrapper with blocking overlay */}
             <div
               ref={playerContainerRef}
-              className={cn(
-                "relative aspect-video bg-black",
-                isMiniPlayerMode
-                  ? cn(
-                      "fixed bottom-20 right-3 z-40 w-[calc(100vw-1.5rem)] max-w-[90vw] overflow-hidden rounded-xl border border-zinc-700 shadow-2xl"
-                    )
-                  : "w-full"
-              )}
-              style={isMiniPlayerMode ? { width: `${clampMiniWidth(miniPlayerWidth)}px` } : undefined}
+              className="relative aspect-video w-full bg-black"
               onClick={revealFullscreenOverlay}
               onMouseMove={revealFullscreenOverlay}
               onTouchStart={revealFullscreenOverlay}
@@ -1399,40 +1265,6 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
               />
               {/* Transparent overlay — blocks accidental mouse interaction with the iframe */}
               <div className="absolute inset-0 z-10 cursor-default" />
-
-              {isMiniPlayerMode && !isPlayerFullscreen ? (
-                <div className="absolute inset-x-0 bottom-0 z-20 bg-gradient-to-t from-black/85 to-transparent px-2 pb-2 pt-5">
-                  <div className="flex items-center justify-end gap-1.5">
-                    <button
-                      className="inline-flex items-center gap-1 rounded-md border border-zinc-600 bg-zinc-900/90 px-2 py-1 text-[10px] text-zinc-100 transition-colors hover:bg-zinc-800"
-                      onClick={() => setIsMiniPlayerMode(false)}
-                      type="button"
-                    >
-                      <Maximize2 className="h-3 w-3" />
-                      Aç
-                    </button>
-                    <button
-                      className="inline-flex items-center gap-1 rounded-md border border-zinc-600 bg-zinc-900/90 px-2 py-1 text-[10px] text-zinc-100 transition-colors hover:bg-zinc-800"
-                      onClick={() => setIsMiniPlayerMode(false)}
-                      type="button"
-                    >
-                      <X className="h-3 w-3" />
-                      Kapat
-                    </button>
-                  </div>
-                </div>
-              ) : null}
-
-              {isMiniPlayerMode && !isPlayerFullscreen ? (
-                <button
-                  aria-label="Mini oynatıcıyı yeniden boyutlandır"
-                  className="absolute bottom-0 right-0 z-30 h-5 w-5 cursor-se-resize rounded-tl-md border-l border-t border-zinc-600 bg-zinc-900/90 text-zinc-300"
-                  onMouseDown={startMiniResize}
-                  type="button"
-                >
-                  <span className="pointer-events-none block translate-y-[-1px] text-[10px]">↘</span>
-                </button>
-              ) : null}
 
               {isPlayerFullscreen ? (
                 <>
@@ -1468,12 +1300,6 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
                         </button>
                       </div>
                       <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                        <span className="rounded-full border border-zinc-700 bg-zinc-900/80 px-2 py-0.5 text-[10px] text-zinc-300">
-                          Online: {onlineMemberCount}
-                        </span>
-                        <span className="rounded-full border border-zinc-700 bg-zinc-900/80 px-2 py-0.5 text-[10px] text-zinc-300">
-                          Senkron: {syncHealth === "good" ? "İyi" : "Gecikmeli"}
-                        </span>
                         <button
                           className="inline-flex items-center gap-1 rounded-full border border-cyan-700/60 bg-cyan-600/20 px-2 py-0.5 text-[10px] text-cyan-100 transition-colors hover:bg-cyan-600/30"
                           onClick={resyncLocalPlayer}
@@ -1611,20 +1437,6 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
                 {isPlayerFullscreen ? <Minimize2 className="h-3 w-3" /> : <Maximize2 className="h-3 w-3" />}
                 {isPlayerFullscreen ? "Küçült" : "Büyüt"}
               </button>
-              <button
-                className={cn(
-                  "inline-flex shrink-0 items-center gap-1 rounded-lg border px-2 py-1.5 text-[11px] transition-colors",
-                  isMiniPlayerMode
-                    ? "border-cyan-700/60 bg-cyan-600/20 text-cyan-100"
-                    : "border-zinc-700 bg-zinc-900 text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
-                )}
-                onClick={() => setIsMiniPlayerMode((prev) => !prev)}
-                title={isMiniPlayerMode ? "Mini pencereyi kapat" : "Mini pencere"}
-                type="button"
-              >
-                <PictureInPicture2 className="h-3 w-3" />
-                Mini
-              </button>
             </div>
 
             {/* ── Owner controls ── */}
@@ -1640,16 +1452,16 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
                 className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs font-medium text-zinc-200 transition-colors hover:bg-zinc-800 disabled:opacity-40"
                 disabled={!isRoomOwner}
                 onClick={toggleSharedPause}
-                title={sharedPaused ? "Devam et (herkes için)" : "Duraklat (herkes için)"}
+                title={isPauseUiState ? "Devam et (herkes için)" : "Duraklat (herkes için)"}
                 type="button"
               >
-                {sharedPaused ? (
+                {isPauseUiState ? (
                   <Play className="h-3.5 w-3.5 text-cyan-400" />
                 ) : (
                   <Pause className="h-3.5 w-3.5" />
                 )}
                 <span className="hidden sm:inline">
-                  {sharedPaused ? "Devam" : "Duraklat"}
+                  {isPauseUiState ? "Devam" : "Duraklat"}
                 </span>
               </button>
 
