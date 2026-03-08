@@ -74,6 +74,7 @@ export function ChatShell() {
   const [nowPlayingVideo, setNowPlayingVideo] = useState<{ video: WatchPartyVideoMeta; startedAt: string } | null>(null);
   const [wpBannerDismissed, setWpBannerDismissed] = useState(false);
   const [wpJoining, setWpJoining] = useState(false);
+  const [wpJoinError, setWpJoinError] = useState<string | null>(null);
   const [wpRoomCreating, setWpRoomCreating] = useState(false);
 
   const createWatchPartyRoom = useCallback(async () => {
@@ -319,6 +320,79 @@ export function ChatShell() {
     },
     [router, searchParams]
   );
+
+  const joinWatchPartyViaInvite = useCallback(
+    async (conversationId: string): Promise<{ ok: true } | { ok: false; message: string }> => {
+      const { data: authData, error: sessionError } = await supabase.auth.getSession();
+      if (sessionError) {
+        return { ok: false, message: sessionError.message };
+      }
+
+      const token = authData.session?.access_token;
+      if (!token) {
+        return { ok: false, message: "Oturum doğrulanamadı. Lütfen tekrar giriş yap." };
+      }
+
+      const response = await fetch("/api/watch-party/join", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({ conversationId })
+      });
+
+      if (!response.ok) {
+        let message = "Watch Party odasına katılınamadı.";
+        try {
+          const body = (await response.json()) as { error?: string };
+          if (body?.error) message = body.error;
+        } catch {
+          // fallback to default message
+        }
+        return { ok: false, message };
+      }
+
+      return { ok: true };
+    },
+    [supabase]
+  );
+
+  useEffect(() => {
+    if (!user || !urlWpId || wpJoining) return;
+
+    let cancelled = false;
+    setWpJoinError(null);
+    setWpJoining(true);
+
+    void (async () => {
+      const result = await joinWatchPartyViaInvite(urlWpId);
+
+      if (cancelled) return;
+
+      if (!result.ok) {
+        setWpJoinError(result.message);
+        setWpJoining(false);
+        return;
+      }
+
+      setSelectedConversationId(urlWpId);
+      setActiveTab("watch-party");
+      setWpBannerDismissed(true);
+      setWpJoinError(null);
+      setWpJoining(false);
+
+      const params = new URLSearchParams(searchParams.toString());
+      params.delete("wp");
+      params.set("conversation", urlWpId);
+      const query = params.toString();
+      router.replace(query ? `/chat?${query}` : "/chat", { scroll: false });
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [joinWatchPartyViaInvite, router, searchParams, supabase, urlWpId, user, wpJoining]);
 
   const ensureSystemConversation = useCallback(async (): Promise<string> => {
     if (!user) throw new Error("Oturum bulunamadı.");
@@ -1217,23 +1291,28 @@ export function ChatShell() {
           className="flex w-full items-center justify-center gap-2 border-t border-zinc-800 bg-cyan-600/20 py-2.5 text-xs font-semibold text-cyan-200 transition-colors hover:bg-cyan-600/30 disabled:opacity-60"
           disabled={wpJoining}
           onClick={() => {
-            if (!user || !urlWpId) return;
+            if (!urlWpId) return;
             setWpJoining(true);
+            setWpJoinError(null);
             void (async () => {
-              try {
-                await supabase
-                  .from("participants")
-                  .upsert(
-                    { conversation_id: urlWpId, user_id: user.id },
-                    { onConflict: "conversation_id,user_id", ignoreDuplicates: true }
-                  );
-              } catch {
-                // RLS may block but navigate anyway
+              const result = await joinWatchPartyViaInvite(urlWpId);
+              if (!result.ok) {
+                setWpJoinError(result.message);
+                setWpJoining(false);
+                return;
               }
+
               setSelectedConversationId(urlWpId);
               setActiveTab("watch-party");
               setWpBannerDismissed(true);
+              setWpJoinError(null);
               setWpJoining(false);
+
+              const params = new URLSearchParams(searchParams.toString());
+              params.delete("wp");
+              params.set("conversation", urlWpId);
+              const query = params.toString();
+              router.replace(query ? `/chat?${query}` : "/chat", { scroll: false });
             })();
           }}
           type="button"
@@ -1241,6 +1320,9 @@ export function ChatShell() {
           <Film className="h-3.5 w-3.5" />
           {wpJoining ? "Katılınıyor..." : "Watch Party\u0027ye Katıl"}
         </button>
+        {wpJoinError ? (
+          <p className="border-t border-zinc-800 px-3 py-2 text-[11px] text-red-300">{wpJoinError}</p>
+        ) : null}
       </div>
     )}
 
