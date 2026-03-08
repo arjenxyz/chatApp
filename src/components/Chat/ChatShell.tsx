@@ -88,6 +88,22 @@ export function ChatShell() {
   const [wpRoomCreating, setWpRoomCreating] = useState(false);
   const [watchPartyPickMode, setWatchPartyPickMode] = useState(false);
 
+  // when on desktop, prefer a 75% video / 25% chat split; also recompute on resize
+  useEffect(() => {
+    if (isMobile) return;
+    const update = () => {
+      const full = window.innerWidth;
+      // target 75% of available width but respect our hard pixel bounds
+      const ideal = Math.round(full * 0.75);
+      const bounded = Math.max(280, Math.min(720, ideal));
+      setWatchPartyWidth(bounded);
+    };
+
+    update();
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, [isMobile]);
+
   const createWatchPartyRoom = useCallback(async () => {
     if (!user) return;
     setWpRoomCreating(true);
@@ -1018,7 +1034,11 @@ export function ChatShell() {
                       const onMove = (me: MouseEvent) => {
                         if (!watchPartyDragRef.current) return;
                         const delta = me.clientX - watchPartyDragRef.current.startX;
-                        setWatchPartyWidth(Math.max(280, Math.min(720, watchPartyDragRef.current.startWidth + delta)));
+                        const base = watchPartyDragRef.current.startWidth + delta;
+
+                        // enforce minimum chat width (280px) and a max that keeps video ~75% of screen
+                        const maxWidth = Math.round(window.innerWidth * 0.75);
+                        setWatchPartyWidth(Math.max(280, Math.min(maxWidth, base)));
                       };
                       const onUp = () => {
                         watchPartyDragRef.current = null;
