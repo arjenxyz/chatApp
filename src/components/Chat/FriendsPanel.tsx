@@ -4,6 +4,7 @@ import { Check, Loader2, MessageSquareText, RefreshCcw, UserRoundPlus, X } from 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 
 import { getSupabaseBrowserClient } from "@/lib/supabase/browser";
+import { mapCaughtError, mapUserFacingError } from "@/lib/errorMessages";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/providers/AuthProvider";
 
@@ -79,7 +80,7 @@ export function FriendsPanel({
         .from("participants")
         .select("conversation_id")
         .eq("user_id", user.id);
-      if (myRowsError) throw new Error(myRowsError.message);
+      if (myRowsError) throw new Error(mapUserFacingError(myRowsError.message, "Sohbet kontrol edilemedi."));
 
       const myConversationIds = (myRows ?? []).map((row) => row.conversation_id);
       if (myConversationIds.length > 0) {
@@ -88,7 +89,7 @@ export function FriendsPanel({
           .select("conversation_id")
           .eq("user_id", otherUserId)
           .in("conversation_id", myConversationIds);
-        if (sharedRowsError) throw new Error(sharedRowsError.message);
+        if (sharedRowsError) throw new Error(mapUserFacingError(sharedRowsError.message, "Ortak sohbetler alınamadı."));
 
         const sharedConversationIds = (sharedRows ?? []).map((row) => row.conversation_id);
         if (sharedConversationIds.length > 0) {
@@ -101,7 +102,7 @@ export function FriendsPanel({
             .limit(1)
             .maybeSingle();
 
-          if (existingDmError) throw new Error(existingDmError.message);
+          if (existingDmError) throw new Error(mapUserFacingError(existingDmError.message, "Mevcut sohbet bulunamadı."));
           if (existingDm?.id) return existingDm.id;
         }
       }
@@ -110,17 +111,17 @@ export function FriendsPanel({
       const { error: conversationError } = await supabase
         .from("conversations")
         .insert({ id: conversationId, owner_id: user.id, is_group: false });
-      if (conversationError) throw new Error(conversationError.message);
+      if (conversationError) throw new Error(mapUserFacingError(conversationError.message, "Sohbet oluşturulamadı."));
 
       const { error: joinError } = await supabase
         .from("participants")
         .insert({ conversation_id: conversationId, user_id: user.id });
-      if (joinError) throw new Error(joinError.message);
+      if (joinError) throw new Error(mapUserFacingError(joinError.message, "Sohbete katılım kaydedilemedi."));
 
       const { error: inviteError } = await supabase
         .from("participants")
         .insert({ conversation_id: conversationId, user_id: otherUserId });
-      if (inviteError) throw new Error(inviteError.message);
+      if (inviteError) throw new Error(mapUserFacingError(inviteError.message, "Davet kaydedilemedi."));
 
       return conversationId;
     },
@@ -154,7 +155,7 @@ export function FriendsPanel({
       ]);
 
     if (friendshipsError || incomingError || outgoingError) {
-      setListError(friendshipsError?.message ?? incomingError?.message ?? outgoingError?.message ?? "Arkadaş listesi yüklenemedi.");
+      setListError(mapUserFacingError(friendshipsError?.message ?? incomingError?.message ?? outgoingError?.message ?? "Arkadaş listesi yüklenemedi.", "Arkadaş listesi yüklenemedi."));
       setListLoading(false);
       return;
     }
@@ -180,7 +181,7 @@ export function FriendsPanel({
         .in("id", profileIds);
 
       if (profileError) {
-        setListError(profileError.message);
+        setListError(mapUserFacingError(profileError.message, "Profil bilgileri yüklenemedi."));
         setListLoading(false);
         return;
       }
@@ -317,7 +318,7 @@ export function FriendsPanel({
         .eq("username", target)
         .maybeSingle();
       if (otherError) {
-        setCreateError(otherError.message);
+        setCreateError(mapUserFacingError(otherError.message, "Kullanıcı aranamadı."));
         return;
       }
       if (!other) {
@@ -337,7 +338,7 @@ export function FriendsPanel({
         .eq("user_b", userB)
         .maybeSingle();
       if (friendshipError) {
-        setCreateError(friendshipError.message);
+        setCreateError(mapUserFacingError(friendshipError.message, "Arkadaşlık durumu kontrol edilemedi."));
         return;
       }
 
@@ -357,7 +358,7 @@ export function FriendsPanel({
         .eq("receiver_id", user.id)
         .maybeSingle();
       if (incomingPendingError) {
-        setCreateError(incomingPendingError.message);
+        setCreateError(mapUserFacingError(incomingPendingError.message, "İstek durumu kontrol edilemedi."));
         return;
       }
 
@@ -368,7 +369,7 @@ export function FriendsPanel({
           .eq("id", incomingPending.id)
           .eq("receiver_id", user.id);
         if (acceptError) {
-          setCreateError(acceptError.message);
+          setCreateError(mapUserFacingError(acceptError.message, "İstek kabul edilemedi."));
           return;
         }
 
@@ -377,7 +378,7 @@ export function FriendsPanel({
           user_b: userB
         });
         if (insertFriendshipError && !insertFriendshipError.message.toLowerCase().includes("duplicate")) {
-          setCreateError(insertFriendshipError.message);
+          setCreateError(mapUserFacingError(insertFriendshipError.message, "Arkadaşlık kaydı oluşturulamadı."));
           return;
         }
 
@@ -396,7 +397,7 @@ export function FriendsPanel({
         .eq("receiver_id", other.id)
         .maybeSingle();
       if (outgoingRequestError) {
-        setCreateError(outgoingRequestError.message);
+        setCreateError(mapUserFacingError(outgoingRequestError.message, "Bekleyen istek kontrol edilemedi."));
         return;
       }
 
@@ -412,7 +413,7 @@ export function FriendsPanel({
           .eq("id", outgoingRequest.id)
           .eq("sender_id", user.id);
         if (resendError) {
-          setCreateError(resendError.message);
+          setCreateError(mapUserFacingError(resendError.message, "İstek tekrar gönderilemedi."));
           return;
         }
 
@@ -427,7 +428,7 @@ export function FriendsPanel({
         status: "pending"
       });
       if (requestError) {
-        setCreateError(requestError.message);
+        setCreateError(mapUserFacingError(requestError.message, "Arkadaşlık isteği gönderilemedi."));
         return;
       }
 
@@ -435,7 +436,7 @@ export function FriendsPanel({
       setNewFriendUsername("");
       await refresh();
     } catch (friendRequestError) {
-      setCreateError(friendRequestError instanceof Error ? friendRequestError.message : "İşlem tamamlanamadı.");
+      setCreateError(mapCaughtError(friendRequestError, "İşlem tamamlanamadı."));
     } finally {
       setCreating(false);
     }
@@ -455,7 +456,7 @@ export function FriendsPanel({
           .eq("id", requestId)
           .eq("receiver_id", user.id);
         if (updateError) {
-          setCreateError(updateError.message);
+          setCreateError(mapUserFacingError(updateError.message, "İstek güncellenemedi."));
           return;
         }
 
@@ -467,7 +468,7 @@ export function FriendsPanel({
           });
 
           if (friendshipError && !friendshipError.message.toLowerCase().includes("duplicate")) {
-            setCreateError(friendshipError.message);
+            setCreateError(mapUserFacingError(friendshipError.message, "Arkadaşlık kaydı oluşturulamadı."));
             return;
           }
 
@@ -480,7 +481,7 @@ export function FriendsPanel({
 
         await refresh();
       } catch (respondError) {
-        setCreateError(respondError instanceof Error ? respondError.message : "İstek işlenemedi.");
+        setCreateError(mapCaughtError(respondError, "İstek işlenemedi."));
       } finally {
         setActionBusyId(null);
       }
@@ -497,7 +498,7 @@ export function FriendsPanel({
         const conversationId = await ensureDirectConversation(friendId);
         onOpenConversation?.(conversationId);
       } catch (openError) {
-        setCreateError(openError instanceof Error ? openError.message : "Sohbet açılamadı.");
+        setCreateError(mapCaughtError(openError, "Sohbet açılamadı."));
       }
     },
     [ensureDirectConversation, onOpenConversation]

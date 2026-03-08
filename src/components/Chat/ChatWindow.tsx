@@ -52,6 +52,8 @@ import {
   subscribeUserPreferences,
   type UserPreferences
 } from "@/lib/userPreferences";
+import { mapUserFacingError } from "@/lib/errorMessages";
+import { extractRoomSerial, withRoomSerial } from "@/lib/roomSerial";
 import {
   buildWatchPartyDisplayText,
   encodeWatchPartyEvent,
@@ -233,6 +235,8 @@ function toReadableMessageText(content: string): string {
 }
 
 function mapMessageInsertErrorMessage(message: string): string {
+  const generic = mapUserFacingError(message, "İşlem tamamlanamadı.");
+  if (generic !== message) return generic;
   if (/row-level security policy/i.test(message)) {
     return "Bu konuşmaya mesaj gönderme iznin yok ya da konuşmada engel ilişkisi var.";
   }
@@ -605,7 +609,7 @@ export function ChatWindow({
       });
 
       if (memberError) {
-        setFailure(memberError.message || "Mesaj izni doğrulanamadı.");
+        setFailure(mapUserFacingError(memberError.message, "Mesaj izni doğrulanamadı."));
         return false;
       }
 
@@ -628,7 +632,7 @@ export function ChatWindow({
         .or(`blocker_id.eq.${user.id},blocked_id.eq.${user.id}`);
 
       if (blockLookupError) {
-        setFailure(blockLookupError.message || "Engel durumu doğrulanamadı.");
+        setFailure(mapUserFacingError(blockLookupError.message, "Engel durumu doğrulanamadı."));
         return false;
       }
 
@@ -919,7 +923,7 @@ export function ChatWindow({
       .from("profiles")
       .select("is_admin")
       .eq("id", user.id)
-      .single();
+      .maybeSingle();
     
     const adminStatus = profileData?.is_admin === true;
     setIsAdmin(adminStatus);
@@ -1009,7 +1013,7 @@ export function ChatWindow({
       .single();
 
     if (error) {
-      setError(error.message);
+      setError(mapMessageInsertErrorMessage(error.message));
       return;
     }
 
@@ -1066,7 +1070,7 @@ export function ChatWindow({
         .delete()
         .eq("blocker_id", user.id)
         .eq("blocked_id", otherUserId);
-      if (error) { setError(error.message); return; }
+      if (error) { setError(mapUserFacingError(error.message, "Bildirim ayarı güncellenemedi.")); return; }
       setBlockStatus("none");
       return;
     }
@@ -1084,7 +1088,7 @@ export function ChatWindow({
     const { error } = await supabase
       .from("user_blocks")
       .insert({ blocker_id: user.id, blocked_id: otherUserId });
-    if (error) { setError(error.message); return; }
+    if (error) { setError(mapUserFacingError(error.message, "Engel durumu güncellenemedi.")); return; }
     setBlockStatus("blockedByMe");
   }, [blockStatus, otherUserId, supabase, user]);
 
@@ -1576,7 +1580,10 @@ export function ChatWindow({
       setGroupInviteStatus("Grup adı en fazla 48 karakter olabilir.");
       return;
     }
-    if (nextName === (conversation?.name ?? "")) {
+    const preservedSerial = extractRoomSerial(conversation?.name);
+    const nextNameWithSerial = withRoomSerial(nextName, preservedSerial);
+
+    if (nextNameWithSerial === (conversation?.name ?? "")) {
       setGroupInviteStatus("Grup adı zaten aynı.");
       return;
     }
@@ -1584,13 +1591,16 @@ export function ChatWindow({
     setGroupNameSaving(true);
     setGroupInviteStatus(null);
     try {
-      const { error: updateError } = await supabase.from("conversations").update({ name: nextName }).eq("id", conversationId);
+      const { error: updateError } = await supabase
+        .from("conversations")
+        .update({ name: nextNameWithSerial })
+        .eq("id", conversationId);
       if (updateError) {
-        setGroupInviteStatus(updateError.message);
+        setGroupInviteStatus(mapUserFacingError(updateError.message, "Grup adı güncellenemedi."));
         return;
       }
 
-      setConversation((prev) => (prev ? { ...prev, name: nextName } : prev));
+      setConversation((prev) => (prev ? { ...prev, name: nextNameWithSerial } : prev));
       setGroupInviteStatus("Grup adı güncellendi.");
     } finally {
       setGroupNameSaving(false);
@@ -1934,7 +1944,7 @@ export function ChatWindow({
         { data: participantData, error: participantError },
         { data: messageData, error: messageError }
       ] = await Promise.all([
-        supabase.from("conversations").select("id, name, is_group, owner_id, created_at").eq("id", conversationId).single(),
+        supabase.from("conversations").select("id, name, is_group, owner_id, created_at").eq("id", conversationId).maybeSingle(),
         supabase
           .from("participants")
           .select("user_id, profile:profiles(id, username, full_name, avatar_url, status)")
@@ -1949,7 +1959,17 @@ export function ChatWindow({
       if (cancelled) return;
 
       if (conversationError || participantError || messageError) {
-        setError(conversationError?.message ?? participantError?.message ?? messageError?.message ?? "Bilinmeyen hata");
+        setError(
+          mapMessageInsertErrorMessage(
+            conversationError?.message ?? participantError?.message ?? messageError?.message ?? "Bilinmeyen hata"
+          )
+        );
+        setLoading(false);
+        return;
+      }
+
+      if (!conversationData) {
+        setError("Bu sohbet bulunamadı veya artık erişilemiyor.");
         setLoading(false);
         return;
       }
@@ -2258,7 +2278,7 @@ export function ChatWindow({
         .eq("id", message.id)
         .eq("sender_id", user.id);
       if (deleteError) {
-        setError(deleteError.message);
+        setError(mapUserFacingError(deleteError.message, "Mesaj silinemedi."));
         return;
       }
 
@@ -2447,7 +2467,7 @@ export function ChatWindow({
           .eq("sender_id", user.id);
 
         if (updateError) {
-          setError(updateError.message);
+          setError(mapUserFacingError(updateError.message, "Mesaj güncellenemedi."));
           return;
         }
 

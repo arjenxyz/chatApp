@@ -4,6 +4,8 @@ import { Loader2, Plus, RefreshCcw, Users } from "lucide-react";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 
 import { getSupabaseBrowserClient } from "@/lib/supabase/browser";
+import { mapUserFacingError } from "@/lib/errorMessages";
+import { withRoomSerial } from "@/lib/roomSerial";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/providers/AuthProvider";
 
@@ -96,7 +98,7 @@ export function GroupsPanel({
       .eq("user_id", user.id);
 
     if (membershipError) {
-      setError(membershipError.message);
+      setError(mapUserFacingError(membershipError.message, "Gruplar yüklenemedi."));
       setLoading(false);
       return;
     }
@@ -129,7 +131,9 @@ export function GroupsPanel({
       ]);
 
     if (conversationsError || participantsError || messagesError) {
-      setError(conversationsError?.message ?? participantsError?.message ?? messagesError?.message ?? "Bilinmeyen hata");
+      setError(
+        mapUserFacingError(conversationsError?.message ?? participantsError?.message ?? messagesError?.message ?? "Bilinmeyen hata", "Gruplar yüklenemedi.")
+      );
       setLoading(false);
       return;
     }
@@ -298,7 +302,7 @@ export function GroupsPanel({
           .in("username", normalizedCreateMembers);
 
         if (profileError) {
-          setCreateError(profileError.message);
+          setCreateError(mapUserFacingError(profileError.message, "Kullanıcılar kontrol edilemedi."));
           return;
         }
 
@@ -332,7 +336,7 @@ export function GroupsPanel({
           .or(`user_a.eq.${user.id},user_b.eq.${user.id}`);
 
         if (friendshipsError) {
-          setCreateError(friendshipsError.message);
+          setCreateError(mapUserFacingError(friendshipsError.message, "Arkadaşlık kontrolü yapılamadı."));
           return;
         }
 
@@ -352,18 +356,19 @@ export function GroupsPanel({
       }
 
       const conversationId = crypto.randomUUID();
+      const roomName = withRoomSerial(groupName);
       const { error: conversationError } = await supabase
         .from("conversations")
         .insert({
           id: conversationId,
-          name: groupName,
+          name: roomName,
           is_group: true,
           is_watch_party_room: isWatchPartyMode,
           owner_id: user.id
         });
 
       if (conversationError) {
-        setCreateError(conversationError.message);
+        setCreateError(mapUserFacingError(conversationError.message, "Grup oluşturulamadı."));
         return;
       }
 
@@ -373,7 +378,7 @@ export function GroupsPanel({
       });
 
       if (creatorJoinError) {
-        setCreateError(creatorJoinError.message);
+        setCreateError(mapUserFacingError(creatorJoinError.message, "Odaya katılım kaydedilemedi."));
         return;
       }
 
@@ -386,7 +391,7 @@ export function GroupsPanel({
         );
 
         if (membersJoinError) {
-          setCreateError(membersJoinError.message);
+          setCreateError(mapUserFacingError(membersJoinError.message, "Üyeler eklenemedi."));
           return;
         }
       }

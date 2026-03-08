@@ -12,6 +12,7 @@ import {
   type WatchPartyPromptPayload,
   type WatchPartyVideoMeta
 } from "@/lib/watchParty";
+import { mapUserFacingError } from "@/lib/errorMessages";
 import { getSupabaseBrowserClient } from "@/lib/supabase/browser";
 import { cn } from "@/lib/utils";
 import { usePresence } from "@/components/Presence/PresenceProvider";
@@ -58,6 +59,8 @@ function buildActorName(user: ReturnType<typeof useAuth>["user"]): string {
 }
 
 function mapMessageInsertErrorMessage(message: string): string {
+  const generic = mapUserFacingError(message, "Watch Party işlemi tamamlanamadı.");
+  if (generic !== message) return generic;
   if (/row-level security policy/i.test(message)) {
     return "Bu odada Watch Party kontrolü gönderemiyorsun. Odaya katıldığından ve engel durumu olmadığından emin ol.";
   }
@@ -309,7 +312,7 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
       if (cancelled) return;
 
       if (loadError) {
-        setError(loadError.message);
+        setError(mapUserFacingError(loadError.message, "Watch Party mesajları yüklenemedi."));
         setLoading(false);
         return;
       }

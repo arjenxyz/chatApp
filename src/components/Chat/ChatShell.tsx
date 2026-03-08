@@ -11,6 +11,8 @@ import { BottomTabNavigation } from "@/components/Chat/BottomTabNavigation";
 import { SettingsPanel } from "@/components/Chat/SettingsPanel";
 import { GroupsPanel } from "@/components/Chat/GroupsPanel";
 import { WatchParty } from "./WatchParty";
+import { mapCaughtError, mapUserFacingError } from "@/lib/errorMessages";
+import { withRoomSerial } from "@/lib/roomSerial";
 import { getSupabaseBrowserClient } from "@/lib/supabase/browser";
 import { useMediaQuery } from "@/lib/useMediaQuery";
 import { cn } from "@/lib/utils";
@@ -91,7 +93,9 @@ export function ChatShell() {
     setWpRoomCreating(true);
     try {
       const conversationId = crypto.randomUUID();
-      const roomName = `Watch Party — ${new Date().toLocaleDateString("tr-TR", { day: "2-digit", month: "short", year: "numeric" })}`;
+      const roomName = withRoomSerial(
+        `Watch Party — ${new Date().toLocaleDateString("tr-TR", { day: "2-digit", month: "short", year: "numeric" })}`
+      );
       const { error: convError } = await supabase.from("conversations").insert({
         id: conversationId,
         name: roomName,
@@ -344,7 +348,7 @@ export function ChatShell() {
     async (conversationId: string): Promise<{ ok: true } | { ok: false; message: string }> => {
       const { data: authData, error: sessionError } = await supabase.auth.getSession();
       if (sessionError) {
-        return { ok: false, message: sessionError.message };
+        return { ok: false, message: mapUserFacingError(sessionError.message, "Oturum doğrulanamadı. Lütfen tekrar giriş yap.") };
       }
 
       const token = authData.session?.access_token;
@@ -701,7 +705,7 @@ export function ChatShell() {
       setPushError(null);
     } catch (error) {
       setPushEnabled(false);
-      setPushError(error instanceof Error ? error.message : "Push senkronizasyonu başarısız.");
+      setPushError(mapCaughtError(error, "Push senkronizasyonu başarısız."));
     }
   }, [getPushRegistration, isMobile, pushPermission, pushSupported, savePushSubscription, user]);
 
@@ -749,7 +753,7 @@ export function ChatShell() {
       persistPushPromptDismissed(true);
     } catch (error) {
       setPushEnabled(false);
-      setPushError(error instanceof Error ? error.message : "Push aktivasyonu başarısız.");
+      setPushError(mapCaughtError(error, "Push aktivasyonu başarısız."));
     } finally {
       setPushBusy(false);
     }
@@ -793,7 +797,7 @@ export function ChatShell() {
     try {
       const { error } = await supabase.from("profiles").update({ username: next }).eq("id", user.id);
       if (error) {
-        setUsernameError(error.message);
+        setUsernameError(mapUserFacingError(error.message, "Kullanıcı adı güncellenemedi."));
         return;
       }
       await refreshProfile();

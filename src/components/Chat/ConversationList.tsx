@@ -15,6 +15,7 @@ import {
 } from "@/lib/chatPreferences";
 import { buildWatchPartyDisplayText, parseWatchPartyBotPayload } from "@/lib/watchParty";
 import { getSupabaseBrowserClient } from "@/lib/supabase/browser";
+import { mapUserFacingError } from "@/lib/errorMessages";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/providers/AuthProvider";
 
@@ -132,7 +133,7 @@ export function ConversationList({
       .eq("user_id", user.id);
 
     if (myRowsError) {
-      setError(myRowsError.message);
+      setError(mapUserFacingError(myRowsError.message, "Sohbet listesi yüklenemedi."));
       setLoading(false);
       return;
     }
@@ -174,11 +175,14 @@ export function ConversationList({
 
     if (conversationsError || participantsError || lastMessagesError || blockedUsersError) {
       setError(
-        conversationsError?.message ??
-          participantsError?.message ??
-          lastMessagesError?.message ??
-          blockedUsersError?.message ??
-          "Bilinmeyen hata"
+        mapUserFacingError(
+          conversationsError?.message ??
+            participantsError?.message ??
+            lastMessagesError?.message ??
+            blockedUsersError?.message ??
+            "Bilinmeyen hata",
+          "Sohbet listesi yüklenemedi."
+        )
       );
       setLoading(false);
       return;
