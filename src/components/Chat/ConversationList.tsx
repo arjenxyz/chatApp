@@ -1,7 +1,7 @@
 "use client";
 
-import { Loader2, MessageSquareText, Pin, PinOff, Plus, RefreshCcw, Search } from "lucide-react";
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { MessageSquareText, Pin, PinOff, RefreshCcw, Search } from "lucide-react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 
 import { usePresence } from "@/components/Presence/PresenceProvider";
 import {
@@ -13,6 +13,7 @@ import {
   loadPinnedConversationIds,
   togglePinnedConversationForUser
 } from "@/lib/chatPreferences";
+import { buildWatchPartyDisplayText, parseWatchPartyBotPayload } from "@/lib/watchParty";
 import { getSupabaseBrowserClient } from "@/lib/supabase/browser";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/providers/AuthProvider";
@@ -58,9 +59,10 @@ type ConversationItem = {
   isBlocked?: boolean;
 };
 
-const USERNAME_REGEX = /^[a-z0-9_]{3,20}$/;
 const MAX_DRAFT_PREVIEW_LENGTH = 56;
 const BOT_MESSAGE_PREFIX = "[[BOT]]";
+const INSTALL_CTA_MARKER = "[[INSTALL_CTA]]";
+const SYSTEM_BOT_CONVERSATION_NAME = "Atlas Bot";
 
 function buildDraftPreviewText(value: string): string {
   const compact = value.replace(/\s+/g, " ").trim();
@@ -78,9 +80,19 @@ function buildPreviewText(message: Pick<LastMessageRow, "content" | "sender_id" 
     return "Mesaj yok";
   }
 
-  const normalizedContent = message.content.startsWith(BOT_MESSAGE_PREFIX)
-    ? message.content.slice(BOT_MESSAGE_PREFIX.length).trim()
+  let normalizedContent = message.content.startsWith(BOT_MESSAGE_PREFIX)
+    ? message.content
+        .slice(BOT_MESSAGE_PREFIX.length)
+        .replaceAll(INSTALL_CTA_MARKER, "")
+        .trim()
     : message.content;
+
+  if (message.content.startsWith(BOT_MESSAGE_PREFIX)) {
+    const parsedWatchParty = parseWatchPartyBotPayload(normalizedContent);
+    if (parsedWatchParty) {
+      normalizedContent = buildWatchPartyDisplayText(parsedWatchParty);
+    }
+  }
   const prefix = message.content.startsWith(BOT_MESSAGE_PREFIX) ? "Bot: " : message.sender_id === currentUserId ? "Sen: " : "";
   const sliced = normalizedContent.length > 60 ? `${normalizedContent.slice(0, 60)}...` : normalizedContent;
   return `${prefix}${sliced}`;
@@ -94,22 +106,17 @@ export function ConversationList({
   onSelectConversation: (conversationId: string) => void;
 }) {
   const supabase = getSupabaseBrowserClient();
-  const { user, profile } = useAuth();
+  const { user } = useAuth();
   const { isOnline } = usePresence();
 
   const [items, setItems] = useState<ConversationItem[]>([]);
   const [search, setSearch] = useState("");
-  const [newDmUsername, setNewDmUsername] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [creating, setCreating] = useState(false);
-  const [createError, setCreateError] = useState<string | null>(null);
   const [pinnedConversationIds, setPinnedConversationIds] = useState<string[]>([]);
   const [conversationFilter, setConversationFilter] = useState<"all" | "pinned">("all");
   const [draftVersion, setDraftVersion] = useState(0);
 
-  const dmInputRef = useRef<HTMLInputElement | null>(null);
-  const canCreate = Boolean(profile?.username);
   const pinnedConversationSet = useMemo(() => new Set(pinnedConversationIds), [pinnedConversationIds]);
 
   const refresh = useCallback(async () => {
@@ -130,11 +137,6 @@ export function ConversationList({
     }
 
     const conversationIds = (myRows ?? []).map((row) => row.conversation_id);
-    if (conversationIds.length === 0) {
-      setItems([]);
-      setLoading(false);
-      return;
-    }
 
     const [
       { data: conversations, error: conversationsError },
@@ -142,20 +144,26 @@ export function ConversationList({
       { data: lastMessages, error: lastMessagesError },
       { data: blockedUsers, error: blockedUsersError }
     ] = await Promise.all([
-      supabase
-        .from("conversations")
-        .select("id, name, is_group, created_at")
-        .in("id", conversationIds)
-        .order("created_at", { ascending: false }),
-      supabase
-        .from("participants")
-        .select("conversation_id, user_id, profile:profiles(id, username, full_name, avatar_url, status)")
-        .in("conversation_id", conversationIds),
-      supabase
-        .from("messages")
-        .select("conversation_id, content, sender_id, created_at, deleted")
-        .in("conversation_id", conversationIds)
-        .order("created_at", { ascending: false }),
+      conversationIds.length > 0
+        ? supabase
+            .from("conversations")
+            .select("id, name, is_group, created_at")
+            .in("id", conversationIds)
+            .order("created_at", { ascending: false })
+        : Promise.resolve({ data: [], error: null }),
+      conversationIds.length > 0
+        ? supabase
+            .from("participants")
+            .select("conversation_id, user_id, profile:profiles(id, username, full_name, avatar_url, status)")
+            .in("conversation_id", conversationIds)
+        : Promise.resolve({ data: [], error: null }),
+      conversationIds.length > 0
+        ? supabase
+            .from("messages")
+            .select("conversation_id, content, sender_id, created_at, deleted")
+            .in("conversation_id", conversationIds)
+            .order("created_at", { ascending: false })
+        : Promise.resolve({ data: [], error: null }),
       supabase
         .from("user_blocks")
         .select("blocked_id, blocker_id")
@@ -163,7 +171,13 @@ export function ConversationList({
     ]);
 
     if (conversationsError || participantsError || lastMessagesError || blockedUsersError) {
-      setError(conversationsError?.message ?? participantsError?.message ?? lastMessagesError?.message ?? blockedUsersError?.message ?? "Bilinmeyen hata");
+      setError(
+        conversationsError?.message ??
+          participantsError?.message ??
+          lastMessagesError?.message ??
+          blockedUsersError?.message ??
+          "Bilinmeyen hata"
+      );
       setLoading(false);
       return;
     }
@@ -205,13 +219,20 @@ export function ConversationList({
         const isBlocked = other?.user_id ? blockedUserIds.has(other.user_id) : false;
         const lastMessage = lastMessageByConversation.get(conversation.id) ?? null;
         const baseTitle = otherProfile?.username || otherProfile?.full_name || "Kullanıcı";
+        const isSystemBotConversation = conversation.is_group && conversation.name === SYSTEM_BOT_CONVERSATION_NAME;
         const title = conversation.is_group ? conversation.name || "Grup Sohbeti" : baseTitle;
         const previewText = lastMessage ? buildPreviewText(lastMessage, user.id) : null;
 
         return {
           id: conversation.id,
           title,
-          subtitle: conversation.is_group ? "Grup" : isBlocked ? "Engellendi" : otherProfile?.full_name || "Direkt mesaj",
+          subtitle: conversation.is_group
+            ? isSystemBotConversation
+              ? "Bot Asistan"
+              : "Grup"
+            : isBlocked
+              ? "Engellendi"
+              : otherProfile?.full_name || "Direkt mesaj",
           isGroup: conversation.is_group,
           otherUserId: conversation.is_group ? null : other?.user_id ?? null,
           avatarUrl: conversation.is_group || isBlocked ? null : otherProfile?.avatar_url ?? null,
@@ -491,130 +512,6 @@ export function ConversationList({
     [user]
   );
 
-  const createDirectConversation = useCallback(async () => {
-    if (!user) return;
-
-    setCreateError(null);
-
-    if (!profile?.username) {
-      setCreateError("Önce kendi kullanıcı adını ayarla.");
-      return;
-    }
-
-    const target = newDmUsername.trim().toLowerCase();
-    if (!target) {
-      setCreateError("Kullanıcı adı gerekli.");
-      return;
-    }
-    if (!USERNAME_REGEX.test(target)) {
-      setCreateError("Geçersiz kullanıcı adı formatı.");
-      return;
-    }
-
-    setCreating(true);
-
-    try {
-      const { data: other, error: otherError } = await supabase
-        .from("profiles")
-        .select("id, username")
-        .eq("username", target)
-        .maybeSingle();
-
-      if (otherError) {
-        setCreateError(otherError.message);
-        return;
-      }
-      if (!other) {
-        setCreateError("Kullanıcı bulunamadı.");
-        return;
-      }
-      if (other.id === user.id) {
-        setCreateError("Kendinle direkt mesaj başlatamazsın.");
-        return;
-      }
-
-      const { data: myRows, error: myRowsError } = await supabase
-        .from("participants")
-        .select("conversation_id")
-        .eq("user_id", user.id);
-
-      if (myRowsError) {
-        setCreateError(myRowsError.message);
-        return;
-      }
-
-      const myConversationIds = (myRows ?? []).map((row) => row.conversation_id);
-      if (myConversationIds.length > 0) {
-        const { data: sharedRows, error: sharedRowsError } = await supabase
-          .from("participants")
-          .select("conversation_id")
-          .eq("user_id", other.id)
-          .in("conversation_id", myConversationIds);
-
-        if (sharedRowsError) {
-          setCreateError(sharedRowsError.message);
-          return;
-        }
-
-        const sharedConversationIds = (sharedRows ?? []).map((row) => row.conversation_id);
-        if (sharedConversationIds.length > 0) {
-          const { data: existingDm, error: existingDmError } = await supabase
-            .from("conversations")
-            .select("id, is_group, created_at")
-            .in("id", sharedConversationIds)
-            .eq("is_group", false)
-            .order("created_at", { ascending: false })
-            .limit(1)
-            .maybeSingle();
-
-          if (existingDmError) {
-            setCreateError(existingDmError.message);
-            return;
-          }
-
-          if (existingDm?.id) {
-            setNewDmUsername("");
-            onSelectConversation(existingDm.id);
-            await refresh();
-            return;
-          }
-        }
-      }
-
-      const conversationId = crypto.randomUUID();
-      const { error: conversationError } = await supabase
-        .from("conversations")
-        .insert({ id: conversationId, owner_id: user.id, is_group: false });
-
-      if (conversationError) {
-        setCreateError(conversationError?.message ?? "Sohbet oluşturulamadı.");
-        return;
-      }
-
-      const { error: joinError } = await supabase
-        .from("participants")
-        .insert({ conversation_id: conversationId, user_id: user.id });
-      if (joinError) {
-        setCreateError(joinError.message);
-        return;
-      }
-
-      const { error: inviteError } = await supabase
-        .from("participants")
-        .insert({ conversation_id: conversationId, user_id: other.id });
-      if (inviteError) {
-        setCreateError(inviteError.message);
-        return;
-      }
-
-      setNewDmUsername("");
-      await refresh();
-      onSelectConversation(conversationId);
-    } finally {
-      setCreating(false);
-    }
-  }, [newDmUsername, onSelectConversation, profile?.username, refresh, supabase, user]);
-
   return (
     <div className="flex h-full flex-col">
       <div className="border-b border-zinc-800/80 p-3">
@@ -634,35 +531,7 @@ export function ConversationList({
             value={search}
           />
         </div>
-
-        <div className="flex items-center gap-2">
-          <input
-            ref={dmInputRef}
-            className="w-full rounded-xl border border-zinc-800 bg-zinc-900/70 px-3 py-2 text-sm text-zinc-100 outline-none placeholder:text-zinc-500 focus:border-zinc-700 disabled:opacity-60"
-            disabled={!canCreate || creating}
-            onChange={(event) => setNewDmUsername(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
-              event.preventDefault();
-              void createDirectConversation();
-            }}
-            placeholder={canCreate ? "Kullanıcı adı ile DM başlat" : "Önce kullanıcı adı ayarla"}
-            value={newDmUsername}
-          />
-          <button
-            aria-label="Yeni DM başlat"
-            className={cn(
-              "inline-flex h-10 w-10 items-center justify-center rounded-xl border border-zinc-800 bg-zinc-900 text-zinc-200 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-60"
-            )}
-            disabled={!canCreate || creating}
-            onClick={() => void createDirectConversation()}
-            type="button"
-          >
-            {creating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
-          </button>
-        </div>
-
-        {createError ? <p className="text-xs text-red-300">{createError}</p> : null}
+        <p className="text-[11px] text-zinc-500">Arkadaş ekleme ve istek yönetimi için Arkadaşlar sekmesini kullan.</p>
       </div>
 
       <div className="flex items-center justify-between border-b border-zinc-800/70 px-3 py-2">
@@ -723,7 +592,7 @@ export function ConversationList({
             <p className="text-xs text-zinc-500">
               {conversationFilter === "pinned"
                 ? "Bir konuşmayı sabitleyerek burada hızlı erişim sağlayabilirsin."
-                : "Yeni DM başlatmak için yukarıdaki kutuyu kullan."}
+                : "Arkadaşlarından birine mesaj atınca konuşmalar burada görünür."}
             </p>
           </div>
         ) : (

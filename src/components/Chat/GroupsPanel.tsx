@@ -46,6 +46,7 @@ type GroupItem = {
 };
 
 const USERNAME_REGEX = /^[a-z0-9_]{3,20}$/;
+const MAX_GROUP_MEMBER_COUNT = 10;
 
 function normalizeProfile(profile: ParticipantProfile | ParticipantProfile[] | null): ParticipantProfile | null {
   if (!profile) return null;
@@ -204,6 +205,7 @@ export function GroupsPanel({
     setCreating(true);
     try {
       let extraMemberIds: string[] = [];
+      let extraMembersById = new Map<string, string>();
       if (normalizedCreateMembers.length > 0) {
         const { data: profiles, error: profileError } = await supabase
           .from("profiles")
@@ -225,6 +227,43 @@ export function GroupsPanel({
         }
 
         extraMemberIds = profileRows.map((item) => item.id).filter((id) => id !== user.id);
+        extraMembersById = new Map(
+          profileRows
+            .filter((item) => item.id !== user.id)
+            .map((item) => [item.id, item.username ?? "kullanici"])
+        );
+      }
+
+      const participantIds = Array.from(new Set(extraMemberIds)).filter((memberId) => memberId !== user.id);
+      if (participantIds.length + 1 > MAX_GROUP_MEMBER_COUNT) {
+        setCreateError(`Bir grup en fazla ${MAX_GROUP_MEMBER_COUNT} üyeden oluşabilir.`);
+        return;
+      }
+
+      if (participantIds.length > 0) {
+        const { data: friendships, error: friendshipsError } = await supabase
+          .from("friendships")
+          .select("user_a, user_b")
+          .or(`user_a.eq.${user.id},user_b.eq.${user.id}`);
+
+        if (friendshipsError) {
+          setCreateError(friendshipsError.message);
+          return;
+        }
+
+        const friendIdSet = new Set(
+          ((friendships as Array<{ user_a: string; user_b: string }> | null) ?? []).map((row) =>
+            row.user_a === user.id ? row.user_b : row.user_a
+          )
+        );
+        const notFriendUsernames = participantIds
+          .filter((memberId) => !friendIdSet.has(memberId))
+          .map((memberId) => extraMembersById.get(memberId) ?? "kullanici");
+
+        if (notFriendUsernames.length > 0) {
+          setCreateError(`Sadece arkadaşlarını gruba ekleyebilirsin: ${notFriendUsernames.join(", ")}`);
+          return;
+        }
       }
 
       const conversationId = crypto.randomUUID();
@@ -252,7 +291,6 @@ export function GroupsPanel({
         return;
       }
 
-      const participantIds = Array.from(new Set(extraMemberIds)).filter((memberId) => memberId !== user.id);
       if (participantIds.length > 0) {
         const { error: membersJoinError } = await supabase.from("participants").insert(
           participantIds.map((memberId) => ({
@@ -279,9 +317,9 @@ export function GroupsPanel({
   }, [createName, normalizedCreateMembers, onOpenConversation, refreshGroups, supabase, user]);
 
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto rounded-2xl border border-zinc-800 bg-zinc-900/45 p-4 md:rounded-2xl md:p-6">
-      <div className="mx-auto max-w-3xl">
-        <div className="mb-5 rounded-2xl border border-zinc-800 bg-zinc-900/70 p-4">
+    <div className="min-h-0 flex-1 overflow-y-auto rounded-2xl border border-zinc-800 bg-zinc-900/45 p-4 md:p-6">
+      <div className="space-y-5">
+        <div className="rounded-2xl border border-zinc-800 bg-zinc-900/70 p-4 md:p-5">
           <div className="mb-3 flex items-center gap-2">
             <Users className="h-4 w-4 text-zinc-300" />
             <h3 className="text-sm font-semibold text-zinc-100">Yeni Grup Oluştur</h3>
@@ -305,6 +343,7 @@ export function GroupsPanel({
               <p className="text-xs text-zinc-500">
                 Sistem seni otomatik olarak gruba ekler. Ek kullanıcılar opsiyonel.
               </p>
+              <p className="text-xs text-zinc-500">Maksimum grup boyutu: {MAX_GROUP_MEMBER_COUNT} üye.</p>
               <button
                 className={cn(
                   "inline-flex items-center gap-2 rounded-xl border px-4 py-2 text-sm font-medium transition-colors",
@@ -326,7 +365,7 @@ export function GroupsPanel({
           {createSuccess ? <p className="mt-3 text-xs text-emerald-300">{createSuccess}</p> : null}
         </div>
 
-        <div className="mb-3 flex items-center justify-between">
+        <div className="flex items-center justify-between">
           <h3 className="text-sm font-semibold text-zinc-200">Gruplarım ({groups.length})</h3>
           <button
             className={cn(
@@ -353,7 +392,7 @@ export function GroupsPanel({
             <p className="mt-1 text-xs text-zinc-500">Yukarıdaki form ile ilk grubunu oluşturabilirsin.</p>
           </div>
         ) : (
-          <ul className="space-y-2">
+          <ul className="grid gap-2 md:grid-cols-2 2xl:grid-cols-3">
             {groups.map((group) => (
               <li key={group.id} className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-3">
                 <div className="flex items-start justify-between gap-3">

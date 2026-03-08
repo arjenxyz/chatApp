@@ -1,22 +1,41 @@
 "use client";
 
-import { BellRing, CloudOff, LogOut, X } from "lucide-react";
+import { BellRing, CloudOff, MessageCircle, Settings as SettingsIcon, UserRoundPlus, Users, X, Film } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 
 import { ChatWindow } from "@/components/Chat/ChatWindow";
 import { ConversationList } from "@/components/Chat/ConversationList";
+import { FriendsPanel } from "@/components/Chat/FriendsPanel";
 import { BottomTabNavigation } from "@/components/Chat/BottomTabNavigation";
 import { SettingsPanel } from "@/components/Chat/SettingsPanel";
 import { GroupsPanel } from "@/components/Chat/GroupsPanel";
+import { WatchParty } from "./WatchParty";
 import { getSupabaseBrowserClient } from "@/lib/supabase/browser";
 import { useMediaQuery } from "@/lib/useMediaQuery";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/providers/AuthProvider";
+import type { WatchPartyVideoMeta } from "@/lib/watchParty";
 
-type Tab = "conversations" | "groups" | "settings";
+type Tab = "conversations" | "friends" | "groups" | "watch-party" | "settings";
 
 const USERNAME_REGEX = /^[a-z0-9_]{3,20}$/;
+const BOT_MESSAGE_PREFIX = "[[BOT]]";
+const INSTALL_CTA_MARKER = "[[INSTALL_CTA]]";
+const SYSTEM_BOT_CONVERSATION_NAME = "Sistem Botu";
+const LEGACY_SYSTEM_CONVERSATION_NAME = "Sistem Bildirimleri";
+const INSTALL_NOTICE_COOLDOWN_MS = 12 * 60 * 60 * 1000;
+const DESKTOP_TABS: Array<{
+  id: Tab;
+  label: string;
+  icon: React.ComponentType<{ className?: string }>;
+}> = [
+  { id: "conversations", label: "Sohbetler", icon: MessageCircle },
+  { id: "friends", label: "Arkadaşlar", icon: UserRoundPlus },
+  { id: "groups", label: "Gruplar", icon: Users },
+  { id: "watch-party", label: "Watch Party", icon: Film },
+  { id: "settings", label: "Ayarlar", icon: SettingsIcon }
+];
 
 type BeforeInstallPromptEvent = Event & {
   prompt: () => Promise<void>;
@@ -40,7 +59,7 @@ export function ChatShell() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const supabase = getSupabaseBrowserClient();
-  const { user, profile, signOut, refreshProfile } = useAuth();
+  const { user, profile, refreshProfile } = useAuth();
 
   const isMobile = useMediaQuery("(max-width: 767px)");
   const [mobileViewportHeight, setMobileViewportHeight] = useState<number | null>(null);
@@ -49,6 +68,43 @@ export function ChatShell() {
   const [isNetworkOnline, setIsNetworkOnline] = useState(true);
   const [installPromptEvent, setInstallPromptEvent] = useState<BeforeInstallPromptEvent | null>(null);
   const [activeTab, setActiveTab] = useState<Tab>("conversations");
+  const [watchPartyWidth, setWatchPartyWidth] = useState(420);
+  const [watchPartyMobilePane, setWatchPartyMobilePane] = useState<"video" | "chat">("video");
+  const watchPartyDragRef = useRef<{ startX: number; startWidth: number } | null>(null);
+  const [nowPlayingVideo, setNowPlayingVideo] = useState<{ video: WatchPartyVideoMeta; startedAt: string } | null>(null);
+  const [wpBannerDismissed, setWpBannerDismissed] = useState(false);
+  const [wpJoining, setWpJoining] = useState(false);
+  const [wpRoomCreating, setWpRoomCreating] = useState(false);
+
+  const createWatchPartyRoom = useCallback(async () => {
+    if (!user) return;
+    setWpRoomCreating(true);
+    try {
+      const conversationId = crypto.randomUUID();
+      const roomName = `Watch Party — ${new Date().toLocaleDateString("tr-TR", { day: "2-digit", month: "short", year: "numeric" })}`;
+      const { error: convError } = await supabase.from("conversations").insert({
+        id: conversationId,
+        name: roomName,
+        is_group: true,
+        owner_id: user.id,
+      });
+      if (convError) throw convError;
+      const { error: partError } = await supabase.from("participants").insert({
+        conversation_id: conversationId,
+        user_id: user.id,
+      });
+      if (partError) throw partError;
+      setSelectedConversationId(conversationId);
+    } catch (err) {
+      console.error("[wp] oda oluşturulamadı:", err);
+    } finally {
+      setWpRoomCreating(false);
+    }
+  }, [supabase, user]);
+
+  const handleNowPlayingChange = useCallback((video: WatchPartyVideoMeta | null, startedAt: string | null) => {
+    setNowPlayingVideo(video && startedAt ? { video, startedAt } : null);
+  }, []);
 
   const [username, setUsername] = useState(profile?.username ?? "");
   const [savingUsername, setSavingUsername] = useState(false);
@@ -63,6 +119,7 @@ export function ChatShell() {
 
   const vapidPublicKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
   const urlConversationId = searchParams.get("conversation");
+  const urlWpId = searchParams.get("wp");
 
   useEffect(() => {
     setUsername(profile?.username ?? "");
@@ -71,6 +128,11 @@ export function ChatShell() {
   const getPushPromptDismissStorageKey = useCallback(() => {
     if (!user) return null;
     return `chat.pushPromptDismissed.${user.id}`;
+  }, [user]);
+
+  const getInstallNoticeStorageKey = useCallback(() => {
+    if (!user) return null;
+    return `chat.installNotice.${user.id}`;
   }, [user]);
 
   const persistPushPromptDismissed = useCallback(
@@ -210,6 +272,11 @@ export function ChatShell() {
     setActiveTab("conversations");
   }, [urlConversationId]);
 
+  // Reset the WP invite banner whenever the ?wp= param changes
+  useEffect(() => {
+    if (urlWpId) setWpBannerDismissed(false);
+  }, [urlWpId]);
+
   useEffect(() => {
     if ((!isMobile && !isPWA) || typeof window === "undefined") {
       setMobileViewportHeight(null);
@@ -251,6 +318,133 @@ export function ChatShell() {
       router.replace(query ? `/chat?${query}` : "/chat", { scroll: false });
     },
     [router, searchParams]
+  );
+
+  const ensureSystemConversation = useCallback(async (): Promise<string> => {
+    if (!user) throw new Error("Oturum bulunamadı.");
+
+    const { data: membershipRows, error: membershipError } = await supabase
+      .from("participants")
+      .select("conversation_id")
+      .eq("user_id", user.id);
+    if (membershipError) throw new Error(membershipError.message);
+
+    const conversationIds = (membershipRows ?? []).map((row) => row.conversation_id);
+    if (conversationIds.length > 0) {
+      const { data: existing, error: existingError } = await supabase
+        .from("conversations")
+        .select("id, name, created_at")
+        .in("id", conversationIds)
+        .eq("is_group", true)
+        .in("name", [SYSTEM_BOT_CONVERSATION_NAME, LEGACY_SYSTEM_CONVERSATION_NAME])
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (existingError) throw new Error(existingError.message);
+      if (existing?.id) {
+        if (existing.name !== SYSTEM_BOT_CONVERSATION_NAME) {
+          const { error: renameError } = await supabase
+            .from("conversations")
+            .update({ name: SYSTEM_BOT_CONVERSATION_NAME })
+            .eq("id", existing.id);
+          if (renameError) {
+            console.warn("[system-bot] sohbet adı güncellenemedi:", renameError.message);
+          }
+        }
+        return existing.id;
+      }
+    }
+
+    const conversationId = crypto.randomUUID();
+    const { error: conversationError } = await supabase.from("conversations").insert({
+      id: conversationId,
+      name: SYSTEM_BOT_CONVERSATION_NAME,
+      is_group: true,
+      owner_id: user.id
+    });
+    if (conversationError) throw new Error(conversationError.message);
+
+    const { error: joinError } = await supabase.from("participants").insert({
+      conversation_id: conversationId,
+      user_id: user.id
+    });
+    if (joinError) throw new Error(joinError.message);
+
+    return conversationId;
+  }, [supabase, user]);
+
+  const sendInstallNoticeAsSystemDm = useCallback(async () => {
+    if (!user || !installPromptEvent || !isNetworkOnline || typeof window === "undefined") return;
+
+    const storageKey = getInstallNoticeStorageKey();
+    if (!storageKey) return;
+
+    const now = Date.now();
+    const lastSent = Number(window.localStorage.getItem(storageKey) ?? "0");
+    if (Number.isFinite(lastSent) && now - lastSent < INSTALL_NOTICE_COOLDOWN_MS) return;
+
+    try {
+      const conversationId = await ensureSystemConversation();
+      const message = `${BOT_MESSAGE_PREFIX}${INSTALL_CTA_MARKER}Uygulama kurulum için hazır. Aşağıdaki "Tek Tıkla Kur" butonuna dokunarak devam edebilirsin.`;
+      const { error: messageError } = await supabase.from("messages").insert({
+        conversation_id: conversationId,
+        sender_id: user.id,
+        content: message,
+        type: "text"
+      });
+      if (messageError) throw new Error(messageError.message);
+
+      window.localStorage.setItem(storageKey, String(now));
+    } catch (noticeError) {
+      console.warn("[install-notice] system dm gönderilemedi:", noticeError);
+    }
+  }, [ensureSystemConversation, getInstallNoticeStorageKey, installPromptEvent, isNetworkOnline, supabase, user]);
+
+  const sendBotSystemMessage = useCallback(
+    async (conversationId: string, text: string) => {
+      if (!user) return;
+      const { error } = await supabase.from("messages").insert({
+        conversation_id: conversationId,
+        sender_id: user.id,
+        content: `${BOT_MESSAGE_PREFIX}${text}`,
+        type: "text"
+      });
+      if (error) throw new Error(error.message);
+    },
+    [supabase, user]
+  );
+
+  const handleInlineInstallFromDm = useCallback(
+    async (conversationId: string) => {
+      if (!installPromptEvent) {
+        await sendBotSystemMessage(
+          conversationId,
+          "Kurulum isteği şu an hazır değil. Tarayıcı menüsünden 'Uygulamayı Yükle' seçeneğini deneyebilirsin."
+        );
+        return;
+      }
+
+      try {
+        await installPromptEvent.prompt();
+        const choice = await installPromptEvent.userChoice;
+        setInstallPromptEvent(null);
+
+        if (choice.outcome === "accepted") {
+          await sendBotSystemMessage(conversationId, "Kurulum başlatıldı. Uygulamayı ana ekranda görebilirsin.");
+          return;
+        }
+
+        await sendBotSystemMessage(conversationId, "Kurulum kapatıldı. İstersen tekrar 'Tek Tıkla Kur' butonuna bas.");
+      } catch (installError) {
+        await sendBotSystemMessage(
+          conversationId,
+          "Kurulum başlatılırken bir hata oluştu. Tarayıcı menüsünden manuel kurulum deneyebilirsin."
+        );
+        console.warn("[install] inline install error:", installError);
+      }
+    },
+    [installPromptEvent, sendBotSystemMessage]
   );
 
   const savePushSubscription = useCallback(
@@ -472,6 +666,11 @@ export function ChatShell() {
     void syncPushSubscription();
   }, [syncPushSubscription]);
 
+  useEffect(() => {
+    if (!installPromptEvent) return;
+    void sendInstallNoticeAsSystemDm();
+  }, [installPromptEvent, sendInstallNoticeAsSystemDm]);
+
   const showUsernameSetup = Boolean(user && profile && !profile.username);
   const showPushPrompt =
     isMobile &&
@@ -481,13 +680,6 @@ export function ChatShell() {
     (pushPermission !== "granted" || !pushEnabled || Boolean(pushError));
   const isMobileConversationView = isMobile && activeTab === "conversations" && Boolean(selectedConversationId);
   const shouldShowMobileTabs = isMobile && !isMobileConversationView;
-
-  const promptInstall = useCallback(async () => {
-    if (!installPromptEvent) return;
-    await installPromptEvent.prompt();
-    await installPromptEvent.userChoice;
-    setInstallPromptEvent(null);
-  }, [installPromptEvent]);
 
   const saveUsername = async () => {
     if (!user) return;
@@ -518,46 +710,15 @@ export function ChatShell() {
   };
 
   return (
+    <>
     <main
       className={cn(
-        "mx-auto flex w-full flex-col overflow-hidden",
-        isPWA ? "max-w-none px-0 py-0" : "max-w-6xl px-3 py-3 md:px-6 md:py-5",
+        "flex w-full max-w-none flex-col overflow-hidden",
+        isPWA ? "px-0 py-0" : isMobile ? "px-3 py-3" : "px-4 py-4",
         isMobile || isPWA ? "h-[100dvh]" : "h-screen"
       )}
       style={mobileViewportHeight ? { height: `${mobileViewportHeight}px` } : undefined}
     >
-      {!isPWA ? (
-        <header className="flex items-center justify-between gap-3 rounded-2xl border border-zinc-800 bg-zinc-900/60 px-4 py-3 shadow-sm backdrop-blur">
-          <div className="min-w-0">
-            <p className="truncate text-sm font-semibold tracking-wide text-zinc-100">Chat Workspace</p>
-            <p className="truncate text-xs text-zinc-500">
-              {profile?.username ? `@${profile.username}` : user?.email ?? "Hesap"}
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            {installPromptEvent ? (
-              <button
-                className="inline-flex items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm font-medium text-zinc-100 hover:bg-zinc-800"
-                onClick={() => void promptInstall()}
-                type="button"
-              >
-                Kur
-              </button>
-            ) : null}
-            <button
-              className="inline-flex items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm font-medium text-zinc-100 hover:bg-zinc-800"
-              onClick={async () => {
-                await signOut();
-              }}
-              type="button"
-            >
-              <LogOut className="h-4 w-4" />
-              Çıkış
-            </button>
-          </div>
-        </header>
-      ) : null}
-
       {!isNetworkOnline ? (
         <section
           className={cn(
@@ -604,12 +765,19 @@ export function ChatShell() {
         </section>
       ) : null}
 
+      {isMobile ? <BottomTabNavigation activeTab={activeTab} mobileHidden={!shouldShowMobileTabs} onTabChange={setActiveTab} /> : null}
+
       <section
         className={cn(
-          "relative grid min-h-0 flex-1 grid-cols-1",
-          isPWA ? "gap-0 md:pb-0" : "mt-3 gap-3 md:pb-0 md:grid-cols-[320px,1fr]",
-          shouldShowMobileTabs ? "pb-[calc(4.25rem+env(safe-area-inset-bottom))]" : "pb-0",
-          isPWA && !isMobile && "md:grid-cols-[320px,1fr]"
+          "relative min-h-0 flex-1",
+          isMobile
+            ? isPWA
+              ? "grid grid-cols-1 gap-0"
+              : "mt-3 grid grid-cols-1 gap-3"
+            : isPWA
+              ? "grid grid-cols-[88px,360px,minmax(0,1fr)] gap-3"
+              : "mt-3 grid grid-cols-[88px,360px,minmax(0,1fr)] gap-3",
+          shouldShowMobileTabs ? "pb-[calc(4.25rem+env(safe-area-inset-bottom))]" : "pb-0"
         )}
       >
         {showPushPrompt ? (
@@ -658,19 +826,61 @@ export function ChatShell() {
           </section>
         ) : null}
 
-        {/* Desktop: Conversations */}
-        {!isMobile && activeTab === "conversations" && (
+        {!isMobile && (
           <>
             <aside
               className={cn(
-                "min-h-0",
-                isPWA ? "rounded-none border-0 bg-zinc-950" : "rounded-2xl border border-zinc-800 bg-zinc-900/45"
+                "min-h-0 overflow-hidden",
+                isPWA ? "border-r border-zinc-800/80 bg-zinc-950" : "rounded-2xl border border-zinc-800 bg-zinc-900/45"
+              )}
+            >
+              <div className={cn("flex h-full flex-col gap-2", isPWA ? "p-2" : "p-2")}>
+                <div className="grid h-14 place-items-center rounded-xl border border-zinc-800 bg-zinc-900/70 text-zinc-100">
+                  {profile?.avatar_url ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img alt="Profil" className="h-9 w-9 rounded-full object-cover" src={profile.avatar_url} />
+                  ) : (
+                    <span className="text-xs font-semibold">{(profile?.username ?? user?.email ?? "U").slice(0, 1).toUpperCase()}</span>
+                  )}
+                </div>
+
+                <nav className="flex flex-1 flex-col gap-1.5">
+                  {DESKTOP_TABS.map((tab) => {
+                    const Icon = tab.icon;
+                    const active = activeTab === tab.id;
+                    return (
+                      <button
+                        key={tab.id}
+                        className={cn(
+                          "flex flex-col items-center justify-center gap-1 rounded-xl border px-2 py-2 text-[11px] font-medium transition-colors",
+                          active
+                            ? "border-blue-600/70 bg-blue-600 text-white shadow-sm shadow-blue-950/50"
+                            : "border-zinc-800 bg-zinc-900/70 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+                        )}
+                        onClick={() => setActiveTab(tab.id)}
+                        type="button"
+                      >
+                        <Icon className="h-4 w-4" />
+                        <span className="leading-none">{tab.label}</span>
+                      </button>
+                    );
+                  })}
+                </nav>
+              </div>
+            </aside>
+
+            <aside
+              className={cn(
+                "min-h-0 overflow-hidden",
+                activeTab === "watch-party" ? "hidden" : "",
+                isPWA ? "border-r border-zinc-800/80 bg-zinc-950" : "rounded-2xl border border-zinc-800 bg-zinc-900/45"
               )}
             >
               <ConversationList
                 onSelectConversation={(conversationId) => {
                   setSelectedConversationId(conversationId);
                   syncConversationInUrl(conversationId);
+                  setActiveTab("conversations");
                 }}
                 selectedConversationId={selectedConversationId}
               />
@@ -678,34 +888,145 @@ export function ChatShell() {
 
             <section
               className={cn(
-                "min-h-0",
-                isPWA ? "rounded-none border-0 bg-zinc-950" : "rounded-2xl border border-zinc-800 bg-zinc-900/45"
+                "min-h-0 overflow-hidden",
+                activeTab === "watch-party" && "col-start-2 col-span-2",
+                activeTab === "conversations" &&
+                  (isPWA ? "border-l border-zinc-800/80 bg-zinc-950" : "rounded-2xl border border-zinc-800 bg-zinc-900/45")
               )}
             >
-              <ChatWindow
-                conversationId={selectedConversationId}
-                networkOnline={isNetworkOnline}
-                onLeaveConversation={() => {
-                  setSelectedConversationId(null);
-                  syncConversationInUrl(null);
-                  setActiveTab("conversations");
-                }}
-              />
+              {/* ALWAYS-MOUNTED: WatchParty stays alive so the iframe/video never stops.
+                  Parent hides it with display:none when not on the tab — iframe keeps running. */}
+              {selectedConversationId && (
+                <div className={cn("flex h-full overflow-hidden", activeTab !== "watch-party" && "hidden")}>
+                  {/* Left: WatchParty panel */}
+                  <div
+                    className={cn(
+                      "flex h-full shrink-0 flex-col overflow-hidden",
+                      isPWA ? "border-r border-zinc-800/80" : "rounded-l-2xl border border-zinc-800"
+                    )}
+                    style={{ width: watchPartyWidth }}
+                  >
+                    <WatchParty
+                      conversationId={selectedConversationId}
+                      isGroupConversation={true}
+                      onNowPlayingChange={handleNowPlayingChange}
+                    />
+                  </div>
+
+                  {/* Drag handle */}
+                  <div
+                    className="group relative z-10 w-1.5 shrink-0 cursor-col-resize bg-zinc-800 transition-colors hover:bg-cyan-600/50 active:bg-cyan-600"
+                    onMouseDown={(e) => {
+                      watchPartyDragRef.current = { startX: e.clientX, startWidth: watchPartyWidth };
+                      const onMove = (me: MouseEvent) => {
+                        if (!watchPartyDragRef.current) return;
+                        const delta = me.clientX - watchPartyDragRef.current.startX;
+                        setWatchPartyWidth(Math.max(280, Math.min(720, watchPartyDragRef.current.startWidth + delta)));
+                      };
+                      const onUp = () => {
+                        watchPartyDragRef.current = null;
+                        window.removeEventListener("mousemove", onMove);
+                        window.removeEventListener("mouseup", onUp);
+                      };
+                      window.addEventListener("mousemove", onMove);
+                      window.addEventListener("mouseup", onUp);
+                    }}
+                  >
+                    <div className="absolute inset-y-0 left-0 right-0 flex flex-col items-center justify-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+                      <span className="h-1 w-1 rounded-full bg-cyan-400" />
+                      <span className="h-1 w-1 rounded-full bg-cyan-400" />
+                      <span className="h-1 w-1 rounded-full bg-cyan-400" />
+                    </div>
+                  </div>
+
+                  {/* Right: ChatWindow — only mount when on watch-party tab (no duplicate subscriptions) */}
+                  {activeTab === "watch-party" && (
+                    <div
+                      className={cn(
+                        "min-w-0 flex-1 overflow-hidden",
+                        isPWA ? "bg-zinc-950" : "rounded-r-2xl border-y border-r border-zinc-800 bg-zinc-900/45"
+                      )}
+                    >
+                      <ChatWindow
+                        conversationId={selectedConversationId}
+                        networkOnline={isNetworkOnline}
+                        canInlineInstall={Boolean(installPromptEvent)}
+                        onInlineInstall={handleInlineInstallFromDm}
+                        onLeaveConversation={() => {
+                          setSelectedConversationId(null);
+                          syncConversationInUrl(null);
+                          setActiveTab("conversations");
+                        }}
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Watch-party empty state */}
+              {activeTab === "watch-party" && !selectedConversationId && (
+                <div className="flex h-full flex-col items-center justify-center gap-5 px-8 text-center">
+                  <div className="flex h-16 w-16 items-center justify-center rounded-full border border-zinc-700 bg-zinc-900">
+                    <Film className="h-7 w-7 text-zinc-400" />
+                  </div>
+                  <div>
+                    <p className="text-sm font-semibold text-zinc-200">Watch Party Odası Yok</p>
+                    <p className="mt-1 text-xs text-zinc-500">Özel bir oda oluştur veya mevcut bir grup sohbeti seç.</p>
+                  </div>
+                  <button
+                    className="inline-flex items-center gap-2 rounded-xl border border-cyan-700/60 bg-cyan-600/20 px-5 py-2.5 text-sm font-semibold text-cyan-100 transition-colors hover:bg-cyan-600/30 disabled:opacity-50"
+                    disabled={wpRoomCreating}
+                    onClick={() => void createWatchPartyRoom()}
+                    type="button"
+                  >
+                    <Film className="h-4 w-4" />
+                    {wpRoomCreating ? "Oluşturuluyor..." : "Oda Oluştur"}
+                  </button>
+                  <button
+                    className="text-xs text-zinc-500 underline underline-offset-2 hover:text-zinc-300"
+                    onClick={() => setActiveTab("conversations")}
+                    type="button"
+                  >
+                    Mevcut grup sohbeti seç
+                  </button>
+                </div>
+              )}
+
+              {/* Other tabs */}
+              {activeTab === "conversations" ? (
+                <ChatWindow
+                  conversationId={selectedConversationId}
+                  networkOnline={isNetworkOnline}
+                  canInlineInstall={Boolean(installPromptEvent)}
+                  onInlineInstall={handleInlineInstallFromDm}
+                  onLeaveConversation={() => {
+                    setSelectedConversationId(null);
+                    syncConversationInUrl(null);
+                    setActiveTab("conversations");
+                  }}
+                />
+              ) : activeTab === "friends" ? (
+                <FriendsPanel
+                  onOpenConversation={(conversationId) => {
+                    setSelectedConversationId(conversationId);
+                    syncConversationInUrl(conversationId);
+                    setActiveTab("conversations");
+                  }}
+                />
+              ) : activeTab === "groups" ? (
+                <GroupsPanel
+                  onOpenConversation={(conversationId) => {
+                    setSelectedConversationId(conversationId);
+                    syncConversationInUrl(conversationId);
+                    setActiveTab("conversations");
+                  }}
+                />
+              ) : activeTab === "settings" ? (
+                <SettingsPanel />
+              ) : null}
             </section>
           </>
         )}
-
-        {!isMobile && activeTab === "groups" && (
-          <GroupsPanel
-            onOpenConversation={(conversationId) => {
-              setSelectedConversationId(conversationId);
-              syncConversationInUrl(conversationId);
-              setActiveTab("conversations");
-            }}
-          />
-        )}
-
-        {!isMobile && activeTab === "settings" && <SettingsPanel />}
 
         {/* Mobile: Tab-based layout */}
         {isMobile && (
@@ -737,6 +1058,8 @@ export function ChatShell() {
                 <ChatWindow
                   conversationId={selectedConversationId}
                   networkOnline={isNetworkOnline}
+                  canInlineInstall={Boolean(installPromptEvent)}
+                  onInlineInstall={handleInlineInstallFromDm}
                   onBack={() => {
                     setSelectedConversationId(null);
                     syncConversationInUrl(null);
@@ -760,13 +1083,208 @@ export function ChatShell() {
               />
             )}
 
+            {activeTab === "friends" && (
+              <FriendsPanel
+                onOpenConversation={(conversationId) => {
+                  setSelectedConversationId(conversationId);
+                  syncConversationInUrl(conversationId);
+                  setActiveTab("conversations");
+                }}
+              />
+            )}
+
             {activeTab === "settings" && <SettingsPanel />}
+
+            {/* Mobile Watch Party */}
+            {activeTab === "watch-party" && (
+              selectedConversationId ? (
+                <section
+                  className={cn(
+                    "flex min-h-0 flex-col overflow-hidden",
+                    isPWA ? "bg-zinc-950" : "rounded-2xl border border-zinc-800 bg-zinc-900/45"
+                  )}
+                >
+                  {/* Toggle bar */}
+                  <div className="flex shrink-0 border-b border-zinc-800 bg-zinc-950">
+                    <button
+                      className={cn(
+                        "flex-1 py-2.5 text-xs font-semibold transition-colors",
+                        watchPartyMobilePane === "video"
+                          ? "border-b-2 border-cyan-500 text-cyan-300"
+                          : "text-zinc-400 hover:text-zinc-200"
+                      )}
+                      onClick={() => setWatchPartyMobilePane("video")}
+                      type="button"
+                    >
+                      Video
+                    </button>
+                    <button
+                      className={cn(
+                        "flex-1 py-2.5 text-xs font-semibold transition-colors",
+                        watchPartyMobilePane === "chat"
+                          ? "border-b-2 border-cyan-500 text-cyan-300"
+                          : "text-zinc-400 hover:text-zinc-200"
+                      )}
+                      onClick={() => setWatchPartyMobilePane("chat")}
+                      type="button"
+                    >
+                      Sohbet
+                    </button>
+                  </div>
+
+                  <div className="min-h-0 flex-1 overflow-hidden">
+                    {/* Always-mounted WatchParty — hidden (not unmounted) when on chat pane */}
+                    <div className={cn("h-full", watchPartyMobilePane !== "video" && "hidden")}>
+                      <WatchParty
+                        conversationId={selectedConversationId}
+                        isGroupConversation={true}
+                        onNowPlayingChange={handleNowPlayingChange}
+                      />
+                    </div>
+                    {watchPartyMobilePane === "chat" && (
+                      <ChatWindow
+                        conversationId={selectedConversationId}
+                        networkOnline={isNetworkOnline}
+                        canInlineInstall={Boolean(installPromptEvent)}
+                        onInlineInstall={handleInlineInstallFromDm}
+                        onBack={() => setWatchPartyMobilePane("video")}
+                        onLeaveConversation={() => {
+                          setSelectedConversationId(null);
+                          syncConversationInUrl(null);
+                          setActiveTab("conversations");
+                        }}
+                      />
+                    )}
+                  </div>
+                </section>
+              ) : (
+                <div className="flex min-h-0 flex-col items-center justify-center gap-5 px-8 text-center">
+                  <div className="flex h-16 w-16 items-center justify-center rounded-full border border-zinc-700 bg-zinc-900">
+                    <Film className="h-7 w-7 text-zinc-400" />
+                  </div>
+                  <div>
+                    <p className="text-sm font-semibold text-zinc-200">Watch Party Odası Yok</p>
+                    <p className="mt-1 text-xs text-zinc-500">Özel bir oda oluştur veya mevcut bir grup sohbeti seç.</p>
+                  </div>
+                  <button
+                    className="inline-flex items-center gap-2 rounded-xl border border-cyan-700/60 bg-cyan-600/20 px-5 py-2.5 text-sm font-semibold text-cyan-100 transition-colors hover:bg-cyan-600/30 disabled:opacity-50"
+                    disabled={wpRoomCreating}
+                    onClick={() => void createWatchPartyRoom()}
+                    type="button"
+                  >
+                    <Film className="h-4 w-4" />
+                    {wpRoomCreating ? "Oluşturuluyor..." : "Oda Oluştur"}
+                  </button>
+                  <button
+                    className="text-xs text-zinc-500 underline underline-offset-2 hover:text-zinc-300"
+                    onClick={() => setActiveTab("conversations")}
+                    type="button"
+                  >
+                    Mevcut grup sohbeti seç
+                  </button>
+                </div>
+              )
+            )}
           </>
         )}
       </section>
-
-      {/* Bottom Tab Navigation (Mobile only) */}
-      <BottomTabNavigation activeTab={activeTab} mobileHidden={!shouldShowMobileTabs} onTabChange={setActiveTab} />
     </main>
+
+    {/* ── Floating PiP Now Playing bar ─────────────────────────────────────────
+         Shows when a video is playing but the user has navigated away from the
+         Watch Party tab. The actual WatchParty iframe is still mounted (hidden),
+         so video/audio continues uninterrupted. This bar is just the indicator.
+    ────────────────────────────────────────────────────────────────────────── */}
+    {/* ── Watch Party invite banner (?wp= URL param) ────────────────────── */}
+    {urlWpId && !wpBannerDismissed && (
+      <div className="fixed bottom-4 left-1/2 z-[65] w-80 -translate-x-1/2 overflow-hidden rounded-2xl border border-cyan-700/60 bg-zinc-950/95 shadow-2xl backdrop-blur-md">
+        <div className="flex items-center gap-3 px-4 py-3">
+          <Film className="h-5 w-5 shrink-0 text-cyan-400" />
+          <div className="min-w-0 flex-1">
+            <p className="text-xs font-semibold text-zinc-100">Watch Party daveti!</p>
+            <p className="mt-0.5 truncate text-[11px] text-zinc-400">Bir Watch Party&#39;ye davet edildiniz.</p>
+          </div>
+          <button
+            aria-label="Daveti kapat"
+            className="shrink-0 rounded-md p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+            onClick={() => setWpBannerDismissed(true)}
+            type="button"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+        <button
+          className="flex w-full items-center justify-center gap-2 border-t border-zinc-800 bg-cyan-600/20 py-2.5 text-xs font-semibold text-cyan-200 transition-colors hover:bg-cyan-600/30 disabled:opacity-60"
+          disabled={wpJoining}
+          onClick={() => {
+            if (!user || !urlWpId) return;
+            setWpJoining(true);
+            void (async () => {
+              try {
+                await supabase
+                  .from("participants")
+                  .upsert(
+                    { conversation_id: urlWpId, user_id: user.id },
+                    { onConflict: "conversation_id,user_id", ignoreDuplicates: true }
+                  );
+              } catch {
+                // RLS may block but navigate anyway
+              }
+              setSelectedConversationId(urlWpId);
+              setActiveTab("watch-party");
+              setWpBannerDismissed(true);
+              setWpJoining(false);
+            })();
+          }}
+          type="button"
+        >
+          <Film className="h-3.5 w-3.5" />
+          {wpJoining ? "Katılınıyor..." : "Watch Party\u0027ye Katıl"}
+        </button>
+      </div>
+    )}
+
+    {nowPlayingVideo && activeTab !== "watch-party" && (
+      <div
+        className="fixed bottom-4 right-4 z-[60] w-72 overflow-hidden rounded-2xl border border-zinc-700 bg-zinc-950/95 shadow-2xl backdrop-blur-md"
+      >
+        {/* Video thumbnail + info */}
+        <div className="flex items-center gap-2 px-3 py-2.5">
+          <div className="relative h-10 w-[4.5rem] shrink-0 overflow-hidden rounded">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              alt={nowPlayingVideo.video.title}
+              className="h-full w-full object-cover"
+              src={nowPlayingVideo.video.thumbnailUrl}
+            />
+            <div className="absolute inset-0 flex items-center justify-center bg-black/40">
+              <Film className="h-4 w-4 text-white" />
+            </div>
+          </div>
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-xs font-semibold text-zinc-100">{nowPlayingVideo.video.title}</p>
+            <p className="truncate text-[11px] text-zinc-400">{nowPlayingVideo.video.channelTitle}</p>
+          </div>
+          <button
+            aria-label="Now Playing çubuğunu kapat"
+            className="shrink-0 rounded-md p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+            onClick={() => setNowPlayingVideo(null)}
+            type="button"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+        {/* Return button */}
+        <button
+          className="flex w-full items-center justify-center gap-1.5 border-t border-zinc-800 bg-zinc-900/80 py-2 text-xs font-semibold text-cyan-300 transition-colors hover:bg-zinc-800 hover:text-cyan-200"
+          onClick={() => setActiveTab("watch-party")}
+          type="button"
+        >
+          <Film className="h-3.5 w-3.5" />
+          Watch Party&#39;ye dön
+        </button>
+      </div>
+    )}
+    </>
   );
 }

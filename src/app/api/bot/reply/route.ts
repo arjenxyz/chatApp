@@ -67,6 +67,53 @@ const ACTION_REGEX = /(yap|todo|task|görev|lazım|gerekli|teslim|deadline|takip
 const DECISION_REGEX = /(karar|onay|seçildi|anlaştık|mutabık|kabul|reddedildi|devam edelim|durduralım)/i;
 const BLOCKER_REGEX = /(engel|blok|hata|sorun|risk|bekliyor|blocked)/i;
 
+function parsePositiveInt(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.floor(parsed);
+}
+
+const BOT_MAX_PROMPT_CHARS = parsePositiveInt(process.env.BOT_MAX_PROMPT_CHARS, 700);
+const BOT_MAX_HISTORY_ITEMS = parsePositiveInt(process.env.BOT_MAX_HISTORY_ITEMS, 18);
+const BOT_RATE_LIMIT_WINDOW_MS = parsePositiveInt(process.env.BOT_RATE_LIMIT_WINDOW_MS, 5 * 60 * 1000);
+const BOT_RATE_LIMIT_MAX_REQUESTS = parsePositiveInt(process.env.BOT_RATE_LIMIT_MAX_REQUESTS, 8);
+const BOT_DAILY_LIMIT = parsePositiveInt(process.env.BOT_DAILY_LIMIT, 40);
+
+const botWindowUsageByUser = new Map<string, number[]>();
+const botDailyUsageByUser = new Map<string, { dayKey: string; count: number }>();
+
+function consumeBotQuota(userId: string): { ok: true } | { ok: false; error: string } {
+  const now = Date.now();
+  const dayKey = new Date(now).toISOString().slice(0, 10);
+  const existingDaily = botDailyUsageByUser.get(userId);
+  const dailyCount = existingDaily && existingDaily.dayKey === dayKey ? existingDaily.count : 0;
+
+  if (dailyCount >= BOT_DAILY_LIMIT) {
+    return {
+      ok: false,
+      error: `Günlük bot limitine ulaşıldı (${BOT_DAILY_LIMIT}). Yarın tekrar deneyebilirsin.`
+    };
+  }
+
+  const minAllowedTs = now - BOT_RATE_LIMIT_WINDOW_MS;
+  const recentUsage = (botWindowUsageByUser.get(userId) ?? []).filter((timestamp) => timestamp >= minAllowedTs);
+
+  if (recentUsage.length >= BOT_RATE_LIMIT_MAX_REQUESTS) {
+    const oldestAllowed = recentUsage[0] ?? now;
+    const retryAfterSeconds = Math.max(1, Math.ceil((oldestAllowed + BOT_RATE_LIMIT_WINDOW_MS - now) / 1000));
+    return {
+      ok: false,
+      error: `Bot çok sık çağrıldı. ${retryAfterSeconds} saniye sonra tekrar deneyin.`
+    };
+  }
+
+  recentUsage.push(now);
+  botWindowUsageByUser.set(userId, recentUsage);
+  botDailyUsageByUser.set(userId, { dayKey, count: dailyCount + 1 });
+
+  return { ok: true };
+}
+
 function compactText(value: string, maxLength = 1000): string {
   const compact = value.replace(/\s+/g, " ").trim();
   if (compact.length <= maxLength) return compact;
@@ -389,7 +436,7 @@ async function callOpenAi(params: {
   const model = process.env.OPENAI_MODEL ?? "gpt-4.1-mini";
   const taskPrompt = compactText(params.task, 1600);
   const userPrompt = compactText(params.prompt, 1600);
-  const history = params.history.slice(-18);
+  const history = params.history.slice(-BOT_MAX_HISTORY_ITEMS);
 
   const messages = [
     {
@@ -420,7 +467,7 @@ async function callOpenAi(params: {
     body: JSON.stringify({
       model,
       temperature: params.temperature ?? 0.3,
-      max_tokens: params.maxTokens ?? 650,
+      max_tokens: params.maxTokens ?? 420,
       messages
     })
   });
@@ -454,7 +501,7 @@ async function executeCommand(parsed: Extract<ParsedPrompt, { kind: "command" }>
             : "Konuşmayı çok kısa özetle. En fazla 6 madde.",
         prompt: args || "Konuşmayı özetle.",
         history,
-        maxTokens: mode === "long" ? 750 : 350
+        maxTokens: mode === "long" ? 520 : 260
       });
 
       return aiReply || buildSummaryFallback(history, mode);
@@ -465,7 +512,7 @@ async function executeCommand(parsed: Extract<ParsedPrompt, { kind: "command" }>
           "Konuşmadan görev/aksiyon maddelerini çıkar. Her madde için: görev, sorumlu (varsa), tarih (varsa), durum.",
         prompt: args || "Aksiyon listesini üret.",
         history,
-        maxTokens: 700
+        maxTokens: 460
       });
 
       return aiReply || buildTasksFallback(history);
@@ -475,7 +522,7 @@ async function executeCommand(parsed: Extract<ParsedPrompt, { kind: "command" }>
         task: "Konuşmadan alınan kararları çıkar. Belirsiz olanları 'taslak karar' olarak ayır.",
         prompt: args || "Kararları listele.",
         history,
-        maxTokens: 650
+        maxTokens: 420
       });
 
       return aiReply || buildDecisionsFallback(history);
@@ -485,7 +532,7 @@ async function executeCommand(parsed: Extract<ParsedPrompt, { kind: "command" }>
         task: "Konuşmaya göre profesyonel toplantı gündemi üret. Bölümler: Hedef, Gündem Maddeleri, Açık Riskler, Çıktılar.",
         prompt: args || "Toplantı gündemi oluştur.",
         history,
-        maxTokens: 650
+        maxTokens: 420
       });
 
       return aiReply || buildAgendaFallback(history);
@@ -495,7 +542,7 @@ async function executeCommand(parsed: Extract<ParsedPrompt, { kind: "command" }>
         task: "Standup formatında özet üret: Dün, Bugün, Blokerler. Kişilere göre grupla.",
         prompt: args || "Standup özeti çıkar.",
         history,
-        maxTokens: 650
+        maxTokens: 420
       });
 
       return aiReply || buildStandupFallback(history);
@@ -510,7 +557,7 @@ async function executeCommand(parsed: Extract<ParsedPrompt, { kind: "command" }>
         task: `Verilen metni ${style} tonda yeniden yaz. Anlamı koru.`,
         prompt: text,
         history: [],
-        maxTokens: 500
+        maxTokens: 360
       });
 
       return aiReply || rewriteFallback(style, text);
@@ -525,7 +572,7 @@ async function executeCommand(parsed: Extract<ParsedPrompt, { kind: "command" }>
         task: `Metni ${target} diline çevir. Sadece çeviri metnini döndür.`,
         prompt: text,
         history: [],
-        maxTokens: 520
+        maxTokens: 380
       });
 
       if (aiReply) return aiReply;
@@ -543,7 +590,7 @@ async function executeCommand(parsed: Extract<ParsedPrompt, { kind: "command" }>
           "Verilen hedef için profesyonel aksiyon planı hazırla. Bölümler: Fazlar, Sorumluluklar, Teslim Tarihleri, Riskler, Takip Ritmi.",
         prompt: goal,
         history,
-        maxTokens: 700
+        maxTokens: 480
       });
 
       return aiReply || buildActionPlanFallback(goal, history);
@@ -554,7 +601,7 @@ async function executeCommand(parsed: Extract<ParsedPrompt, { kind: "command" }>
         task: "Profesyonel sohbet asistanı gibi soruyu yanıtla. Gerekirse kısa eylem planı ekle.",
         prompt: askPrompt,
         history,
-        maxTokens: 700
+        maxTokens: 460
       });
 
       if (aiReply) return aiReply;
@@ -589,7 +636,14 @@ export async function POST(request: NextRequest) {
 
     const body = (await request.json()) as BotReplyRequest;
     const conversationId = body.conversationId?.trim();
-    const prompt = body.prompt ? compactText(body.prompt, 1800) : "";
+    const rawPrompt = body.prompt?.trim() ?? "";
+    if (rawPrompt.length > BOT_MAX_PROMPT_CHARS) {
+      return NextResponse.json(
+        { error: `Bot isteği en fazla ${BOT_MAX_PROMPT_CHARS} karakter olabilir.` },
+        { status: 400 }
+      );
+    }
+    const prompt = rawPrompt ? compactText(rawPrompt, BOT_MAX_PROMPT_CHARS) : "";
     if (!conversationId || !prompt) {
       return NextResponse.json({ error: "conversationId and prompt are required." }, { status: 400 });
     }
@@ -620,13 +674,18 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: conversationError?.message ?? "Bot only works in group conversations." }, { status: 400 });
     }
 
+    const quotaCheck = consumeBotQuota(requesterId);
+    if (!quotaCheck.ok) {
+      return NextResponse.json({ error: quotaCheck.error }, { status: 429 });
+    }
+
     const history = ((body.messages ?? []) as Array<{ senderName?: string; content?: string }>)
       .map((row) => ({
         senderName: compactText(row.senderName || "kullanici", 48),
         content: compactText(row.content || "", 900)
       }))
       .filter((row) => row.content.length > 0)
-      .slice(-24);
+      .slice(-BOT_MAX_HISTORY_ITEMS);
 
     const parsed = parsePrompt(prompt);
 
@@ -651,4 +710,3 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Bot yanıtı oluşturulamadı." }, { status: 500 });
   }
 }
-
