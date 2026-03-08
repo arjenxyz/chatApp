@@ -336,14 +336,29 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
     } else {
       setSyncAnchorMs(null);
     }
-    setSharedPaused(false);
-    setOwnerReportedPaused(false);
-    setPausedPositionSec(null);
+    const initialPositionSec = projection.currentVideoStartedAt
+      ? Math.max(0, (Date.now() - new Date(projection.currentVideoStartedAt).getTime()) / 1000)
+      : 0;
+
+    // Non-owner viewers should wait for explicit owner sync before auto-playing.
+    if (isRoomOwner) {
+      setSharedPaused(false);
+      setOwnerReportedPaused(false);
+      setPausedPositionSec(null);
+    } else {
+      setSharedPaused(true);
+      setOwnerReportedPaused(true);
+      setPausedPositionSec(initialPositionSec);
+      sendYTCommand("pauseVideo");
+    }
+
+    lastRemoteSyncRef.current = null;
+    lastBroadcastSyncAtRef.current = 0;
     setSharedMuted(false);
     setSharedPlaybackRate(1);
     setSelectedPlaybackQuality("auto");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projection.currentVideo?.videoId, projection.currentVideoStartedAt]);
+  }, [isRoomOwner, onNowPlayingChange, projection.currentVideo, projection.currentVideoStartedAt, sendYTCommand]);
 
   useEffect(() => {
     const onFullscreenChange = () => {
@@ -696,7 +711,7 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
 
   const iframeSrc = useMemo(() => {
     if (!currentVideoId) return "";
-    const base = `https://www.youtube.com/embed/${currentVideoId}?autoplay=1&rel=0&enablejsapi=1`;
+    const base = `https://www.youtube.com/embed/${currentVideoId}?autoplay=0&rel=0&enablejsapi=1`;
     const originPart = typeof window !== "undefined" ? `&origin=${encodeURIComponent(window.location.origin)}` : "";
     if (!projection.currentVideoStartedAt) {
       return `${base}${originPart}`;
@@ -981,6 +996,24 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
       if (Date.now() - lastBroadcastSyncAtRef.current < 1500) {
         return;
       }
+
+      const latestOwnerSnapshot = lastRemoteSyncRef.current;
+      const hasRecentOwnerSignal = Boolean(
+        latestOwnerSnapshot &&
+          latestOwnerSnapshot.videoId === projection.currentVideo?.videoId &&
+          Date.now() - latestOwnerSnapshot.sentAtMs < 3000
+      );
+
+      if (!hasRecentOwnerSignal) {
+        const freezeAt = getSharedElapsed();
+        setSharedPaused(true);
+        setOwnerReportedPaused(true);
+        setPausedPositionSec(freezeAt);
+        sendYTCommand("pauseVideo");
+        pushSyncFeedback("Owner sinyali bekleniyor, oynatma duraklatıldı");
+        return;
+      }
+
       const expectedPos = getSharedElapsed();
       sendYTCommand("seekTo", [expectedPos, true]);
       sendYTCommand("setPlaybackRate", [sharedPlaybackRate]);
