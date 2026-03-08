@@ -1,25 +1,54 @@
 {
-  "name": "ChatApp",
-  "short_name": "Chat",
-  "description": "Realtime chat built with Next.js and Supabase",
-  "id": "/chat",
-  "start_url": "/chat",
+  "name": "ChatApp • Sungo & Pato",
+  "short_name": "ChatApp",
+  "description": "Güvenli, gerçek zamanlı mesajlaşma ve Watch Party deneyimi.",
+  "lang": "tr",
+  "dir": "ltr",
+  "id": "/",
+  "start_url": "/?source=pwa",
   "scope": "/",
-  "display_override": ["standalone", "minimal-ui"],
+  "display_override": ["standalone", "minimal-ui", "browser"],
   "display": "standalone",
   "orientation": "portrait-primary",
   "background_color": "#121212",
   "theme_color": "#3b82f6",
+  "categories": ["social", "communication", "entertainment"],
+  "launch_handler": {
+    "client_mode": "focus-existing"
+  },
+  "prefer_related_applications": false,
+  "shortcuts": [
+    {
+      "name": "Sohbete Git",
+      "short_name": "Sohbet",
+      "description": "Doğrudan sohbet ekranını aç",
+      "url": "/chat"
+    },
+    {
+      "name": "Giriş",
+      "short_name": "Login",
+      "description": "Hızlıca giriş ekranına git",
+      "url": "/auth/login"
+    }
+  ],
   "icons": [
+    {
+      "src": "/sungoandpato.gif",
+      "sizes": "any",
+      "type": "image/gif",
+      "purpose": "any"
+    },
     {
       "src": "/icons/icon-192.svg",
       "sizes": "192x192",
-      "type": "image/svg+xml"
+      "type": "image/svg+xml",
+      "purpose": "any maskable monochrome"
     },
     {
       "src": "/icons/icon-512.svg",
       "sizes": "512x512",
-      "type": "image/svg+xml"
+      "type": "image/svg+xml",
+      "purpose": "any maskable monochrome"
     }
   ]
 }
