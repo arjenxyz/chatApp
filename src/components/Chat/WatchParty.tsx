@@ -1,7 +1,7 @@
 "use client";
 
 import type { RealtimeChannel } from "@supabase/supabase-js";
-import { Check, ChevronDown, ChevronUp, Copy, ExternalLink, FastForward, Gauge, Link2, ListVideo, Maximize2, Minimize2, MoreHorizontal, Pause, Play, Rewind, RotateCcw, SkipBack, SkipForward, StopCircle, Trash2, UserPlus } from "lucide-react";
+import { Check, ChevronDown, ChevronUp, Copy, ExternalLink, FastForward, Gauge, Link2, ListVideo, Maximize2, MessageCircle, Minimize2, MoreHorizontal, Pause, Play, Rewind, RotateCcw, RotateCw, SkipBack, SkipForward, StopCircle, Trash2, UserPlus, X } from "lucide-react";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { WatchPartyTerms } from "./WatchPartyTerms";
@@ -226,6 +226,7 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
   const [isPlayerFullscreen, setIsPlayerFullscreen] = useState(false);
   const [selectedPlaybackQuality, setSelectedPlaybackQuality] = useState<PlayerQuality>("auto");
   const [showFullscreenOverlay, setShowFullscreenOverlay] = useState(false);
+  const [showFullscreenChat, setShowFullscreenChat] = useState(false);
   const [showMorePlayerControls, setShowMorePlayerControls] = useState(false);
 
   // Invite panel
@@ -269,6 +270,10 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
     if (projection.playedHistory.length === 0) return null;
     return projection.playedHistory[projection.playedHistory.length - 1] ?? null;
   }, [projection.playedHistory]);
+  const fullscreenChatMessages = useMemo(
+    () => messages.filter((message) => !message.deleted && !isBotMessage(message.content)).slice(-30),
+    [messages]
+  );
 
   const pushSyncFeedback = useCallback((message: string) => {
     setSyncFeedback(message);
@@ -339,6 +344,14 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
       const nextFullscreen = Boolean(element && document.fullscreenElement === element);
       setIsPlayerFullscreen(nextFullscreen);
       setShowFullscreenOverlay(nextFullscreen);
+      if (!nextFullscreen) {
+        setShowFullscreenChat(false);
+        try {
+          screen.orientation?.unlock?.();
+        } catch {
+          // Ignore unsupported orientation unlock errors
+        }
+      }
 
       if (fullscreenOverlayTimerRef.current !== null) {
         window.clearTimeout(fullscreenOverlayTimerRef.current);
@@ -346,6 +359,17 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
       }
 
       if (nextFullscreen) {
+        try {
+          if (window.matchMedia("(max-width: 768px)").matches) {
+            const lockOrientation = (screen.orientation as ScreenOrientation & {
+              lock?: (orientation: "portrait" | "landscape") => Promise<void>;
+            }).lock;
+            void lockOrientation?.("landscape");
+          }
+        } catch {
+          // Ignore unsupported orientation lock errors
+        }
+
         fullscreenOverlayTimerRef.current = window.setTimeout(() => {
           setShowFullscreenOverlay(false);
           fullscreenOverlayTimerRef.current = null;
@@ -800,6 +824,29 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
     }, 3000);
   }, [isPlayerFullscreen]);
 
+  const requestLandscapeMode = useCallback(async () => {
+    if (!isPlayerFullscreen) {
+      pushSyncFeedback("Önce tam ekranı aç.");
+      return;
+    }
+
+    const lockOrientation = (screen.orientation as ScreenOrientation & {
+      lock?: (orientation: "portrait" | "landscape") => Promise<void>;
+    }).lock;
+
+    if (!lockOrientation) {
+      pushSyncFeedback("Cihaz yatay kilitlemeyi desteklemiyor.");
+      return;
+    }
+
+    try {
+      await lockOrientation("landscape");
+      pushSyncFeedback("Yatay moda geçildi.");
+    } catch {
+      pushSyncFeedback("Yatay moda geçiş başarısız.");
+    }
+  }, [isPlayerFullscreen, pushSyncFeedback]);
+
   const latestPlaybackEvent = useMemo(() => {
     if (!projection.currentVideo?.videoId) return null;
 
@@ -1225,6 +1272,33 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
               {/* Transparent overlay — blocks accidental mouse interaction with the iframe */}
               <div className="absolute inset-0 z-10 cursor-default" />
 
+              {isPlayerFullscreen && showFullscreenChat ? (
+                <div className="absolute right-3 top-3 z-30 w-[min(24rem,calc(100%-1.5rem))] rounded-xl border border-zinc-700 bg-zinc-950/95 shadow-lg backdrop-blur-sm">
+                  <div className="flex items-center justify-between border-b border-zinc-800 px-3 py-2">
+                    <p className="text-xs font-semibold text-zinc-100">Sohbet</p>
+                    <button
+                      className="inline-flex items-center gap-1 rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-[11px] text-zinc-200 transition-colors hover:bg-zinc-800"
+                      onClick={() => setShowFullscreenChat(false)}
+                      type="button"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                      Kapat
+                    </button>
+                  </div>
+                  <div className="max-h-64 space-y-1 overflow-y-auto px-3 py-2">
+                    {fullscreenChatMessages.length === 0 ? (
+                      <p className="text-[11px] text-zinc-500">Gösterilecek sohbet mesajı yok.</p>
+                    ) : (
+                      fullscreenChatMessages.map((message) => (
+                        <div key={message.id} className="rounded-md border border-zinc-800 bg-zinc-900/70 px-2 py-1.5">
+                          <p className="line-clamp-3 text-[11px] text-zinc-200">{message.content}</p>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              ) : null}
+
               {isPlayerFullscreen && showFullscreenOverlay ? (
                 <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 bg-gradient-to-t from-black/80 to-transparent px-3 pb-3 pt-8">
                   <div className="pointer-events-auto flex items-end gap-3">
@@ -1232,6 +1306,29 @@ export function WatchParty({ conversationId, isGroupConversation, onNowPlayingCh
                       <p className="truncate text-sm font-semibold text-zinc-100">{projection.currentVideo.title}</p>
                       <p className="truncate text-xs text-zinc-300/90">{projection.currentVideo.channelTitle}</p>
                     </div>
+                    <button
+                      className={cn(
+                        "inline-flex shrink-0 items-center gap-1 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-colors",
+                        showFullscreenChat
+                          ? "border-cyan-700/60 bg-cyan-600/20 text-cyan-100"
+                          : "border-zinc-600 bg-zinc-900/90 text-zinc-100 hover:bg-zinc-800"
+                      )}
+                      onClick={() => setShowFullscreenChat((prev) => !prev)}
+                      type="button"
+                    >
+                      <MessageCircle className="h-3.5 w-3.5" />
+                      Sohbet
+                    </button>
+                    <button
+                      className="inline-flex shrink-0 items-center gap-1 rounded-lg border border-zinc-600 bg-zinc-900/90 px-2.5 py-1.5 text-xs font-medium text-zinc-100 transition-colors hover:bg-zinc-800"
+                      onClick={() => {
+                        void requestLandscapeMode();
+                      }}
+                      type="button"
+                    >
+                      <RotateCw className="h-3.5 w-3.5" />
+                      Yatay
+                    </button>
                     <button
                       className="inline-flex shrink-0 items-center gap-1 rounded-lg border border-zinc-600 bg-zinc-900/90 px-2.5 py-1.5 text-xs font-medium text-zinc-100 transition-colors hover:bg-zinc-800"
                       onClick={() => {
